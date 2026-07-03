@@ -1,0 +1,12 @@
+[
+    {
+        "name": "loopsbench",
+        "version": "head",
+        "description": "Metadata for the LoopsBench core checkout.",
+        "long_horizon_bench_version": "latest",
+        "dataset_path": null,
+        "branch": "main",
+        "commit_hash": "head",
+        "task_id_subset": null
+    }
+]

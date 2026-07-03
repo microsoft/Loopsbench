@@ -1,0 +1,153 @@
+"""GitHub Copilot CLI integration for Long-Horizon-Bench."""
+
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
+from pathlib import Path
+
+from long_horizon_bench.agents.agent_name import AgentName
+from long_horizon_bench.agents.base_agent import AgentResult, BaseAgent
+from long_horizon_bench.terminal.tmux_session import TmuxSession
+
+
+_COPILOT_BIN_CONTAINER = "/usr/local/bin/copilot"
+_TRAJECTORY_CONTAINER = "/agent-logs/trajectories/copilot_stream.jsonl"
+_LAST_MESSAGE_CONTAINER = "/agent-logs/copilot_last_message.txt"
+_DEFAULT_PROVIDER_BASE_URL = "http://127.0.0.1:4145/v1"
+_DEFAULT_MODEL = "mai-code-1-flash-internal"
+_DEFAULT_PROVIDER_MODEL_ID = "gpt-5.4"
+
+
+class CopilotAgent(BaseAgent):
+    """Run tasks using GitHub Copilot CLI."""
+
+    def __init__(self, model_name: str = _DEFAULT_MODEL, **kwargs):
+        super().__init__(**kwargs)
+        self._model_name = model_name
+        self._provider_base_url = os.environ.get(
+            "COPILOT_LHB_PROVIDER_BASE_URL", _DEFAULT_PROVIDER_BASE_URL
+        )
+        self._provider_api_key = os.environ.get("COPILOT_LHB_API_KEY", "sk-lhb")
+        self._provider_model_id = os.environ.get(
+            "COPILOT_LHB_PROVIDER_MODEL_ID", _DEFAULT_PROVIDER_MODEL_ID
+        )
+        self._max_prompt_tokens = os.environ.get(
+            "COPILOT_LHB_MAX_PROMPT_TOKENS", "230000"
+        )
+        self._max_output_tokens = os.environ.get(
+            "COPILOT_LHB_MAX_OUTPUT_TOKENS", "64000"
+        )
+
+    @staticmethod
+    def name() -> str:
+        return AgentName.COPILOT.value
+
+    def get_trajectory_paths(self) -> list[str]:
+        return [_TRAJECTORY_CONTAINER, _LAST_MESSAGE_CONTAINER]
+
+    def _env_assignments(self) -> dict[str, str]:
+        return {
+            "COPILOT_PROVIDER_BASE_URL": self._provider_base_url,
+            "COPILOT_PROVIDER_TYPE": "openai",
+            "COPILOT_PROVIDER_WIRE_API": "responses",
+            "COPILOT_PROVIDER_API_KEY": self._provider_api_key,
+            "COPILOT_MODEL": self._model_name,
+            "COPILOT_PROVIDER_MODEL_ID": self._provider_model_id,
+            "COPILOT_PROVIDER_WIRE_MODEL": self._model_name,
+            "COPILOT_PROVIDER_MAX_PROMPT_TOKENS": self._max_prompt_tokens,
+            "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS": self._max_output_tokens,
+            "COPILOT_ALLOW_ALL": "1",
+            "CI": "1",
+            "NO_COLOR": "1",
+        }
+
+    def _build_copilot_command(self, instruction: str) -> str:
+        env = " ".join(
+            f"{key}={shlex.quote(value)}"
+            for key, value in self._env_assignments().items()
+        )
+        copilot_args = " ".join(
+            [
+                shlex.quote(_COPILOT_BIN_CONTAINER),
+                "-p",
+                shlex.quote(instruction),
+                "--allow-all",
+                "--no-remote",
+                "--no-color",
+                "--output-format json",
+                f"--model {shlex.quote(self._model_name)}",
+            ]
+        )
+        return (
+            "mkdir -p /agent-logs/trajectories && "
+            "cd /workspace && "
+            f"{env} {copilot_args} > {_TRAJECTORY_CONTAINER} 2>&1; "
+            f"tail -n 80 {_TRAJECTORY_CONTAINER} > {_LAST_MESSAGE_CONTAINER}"
+        )
+
+    @staticmethod
+    def _resolve_host_copilot_binary() -> Path:
+        explicit = os.environ.get("COPILOT_CLI_HOST_BIN")
+        if explicit:
+            path = Path(explicit).expanduser()
+            if path.is_file():
+                return path
+            raise FileNotFoundError(
+                f"COPILOT_CLI_HOST_BIN is set to {explicit!r}, but it is not a file"
+            )
+
+        which = shutil.which("copilot")
+        if which:
+            package_root = Path(which).resolve().parent.parent / "lib" / "node_modules"
+            native = package_root / "@github" / "copilot" / "node_modules" / "@github" / "copilot-linux-x64" / "copilot"
+            if native.is_file():
+                return native
+
+        fallback = Path.home() / ".nvm" / "versions" / "node" / "v22.14.0" / "lib" / "node_modules" / "@github" / "copilot" / "node_modules" / "@github" / "copilot-linux-x64" / "copilot"
+        if fallback.is_file():
+            return fallback
+        raise FileNotFoundError(
+            "Could not find the GitHub Copilot CLI native binary. Install it with: "
+            "npm install -g @github/copilot, or set COPILOT_CLI_HOST_BIN."
+        )
+
+    def _ensure_copilot_cli(self, session: TmuxSession) -> None:
+        container = session._container  # type: ignore[attr-defined]
+        rc, _ = container.exec_run(
+            ["bash", "-lc", f"test -x {shlex.quote(_COPILOT_BIN_CONTAINER)}"],
+            demux=True,
+        )
+        if int(rc) == 0:
+            return
+
+        from long_horizon_bench.terminal.docker_compose_manager import (
+            DockerComposeManager,
+        )
+
+        DockerComposeManager.copy_to_container(
+            container=container,
+            paths=self._resolve_host_copilot_binary(),
+            container_dir="/usr/local/bin",
+            container_filename="copilot",
+        )
+        session.send_keys(
+            f"chmod +x {shlex.quote(_COPILOT_BIN_CONTAINER)} Enter",
+            block=True,
+            max_timeout_sec=10.0,
+        )
+
+    def perform_task(
+        self,
+        instruction: str,
+        session: TmuxSession,
+        logging_dir: Path | None = None,
+        timeout_sec: float | None = None,
+    ) -> AgentResult:
+        self._ensure_copilot_cli(session)
+        session.send_keys(
+            f"{self._build_copilot_command(instruction)} Enter",
+            block=True,
+            max_timeout_sec=timeout_sec or 86400.0,
+        )

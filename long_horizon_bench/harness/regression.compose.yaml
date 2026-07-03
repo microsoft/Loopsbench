@@ -1,0 +1,29 @@
+# Regression harness: agent + tester containers sharing a named volume.
+# Compose this with the task's own docker-compose.yaml via:
+#   docker compose -f <task>/docker-compose.yaml -f regression.compose.yaml up -d
+# The task's `client` service is reused as the agent container. We add a `tester`
+# service using the same image, plus a shared named volume `lhb_shared`.
+
+services:
+  client:
+    volumes:
+      - lhb_shared:/shared
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  tester:
+    image: ${LHB_TASK_DOCKER_CLIENT_IMAGE_NAME}
+    container_name: ${LHB_TASK_DOCKER_CLIENT_CONTAINER_NAME}_tester
+    command: ["sh", "-c", "sleep infinity"]
+    volumes:
+      - lhb_shared:/shared
+      - ${LHB_TASK_DIR}/tests:/tests:ro
+      - ${LHB_TASK_DIR}/run-tests.sh:/task-assets/run-tests.sh:ro
+      - ${LHB_TASK_DIR}:/task-assets/task:ro
+    depends_on:
+      - client
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  lhb_shared:
