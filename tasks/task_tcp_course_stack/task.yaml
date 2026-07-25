@@ -62,3 +62,4 @@ source_repository_url: https://github.com/example/loopsbench-example-task
 source_base_revision: example-base-revision
 proposal_url: https://github.com/microsoft/Loopsbench/issues/1
 license_status: Placeholder provenance for the example task; replace with real provenance on published contributions.
+# smoke-test-marker: 2026-07-25T08:50:21Z
