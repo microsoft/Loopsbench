@@ -1,0 +1,33 @@
+services:
+  client:
+    build:
+      dockerfile: Dockerfile
+    image: ${LHB_TASK_DOCKER_CLIENT_IMAGE_NAME}
+    container_name: ${LHB_TASK_DOCKER_CLIENT_CONTAINER_NAME}
+    cap_add:
+    - NET_ADMIN
+    command:
+    - sh
+    - -c
+    - sleep infinity
+    environment:
+    - TEST_DIR=${LHB_TEST_DIR}
+    volumes:
+    - ${LHB_TASK_LOGS_PATH}:${LHB_CONTAINER_LOGS_PATH}
+    - ${LHB_TASK_AGENT_LOGS_PATH}:${LHB_CONTAINER_AGENT_LOGS_PATH}
+    - lhb_shared:/var/lib/lhb/.mirror
+  tester:
+    image: ${LHB_TASK_DOCKER_CLIENT_IMAGE_NAME}
+    container_name: ${LHB_TASK_DOCKER_TESTER_CONTAINER_NAME}
+    cap_add:
+    - NET_ADMIN
+    command:
+    - sh
+    - -c
+    - sleep infinity
+    depends_on:
+    - client
+    volumes:
+    - lhb_shared:/shared
+volumes:
+  lhb_shared: {}
