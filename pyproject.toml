@@ -10,7 +10,7 @@ dependencies = [
     "docker>=7.1.0",
     "openai>=1.59.9",
     "pydantic>=2.10.5",
-    "pygments<2.20",
+    "pygments<2.21",
     "pyyaml>=6.0.0",
     "ruamel-yaml>=0.18.10",
     "rich>=13.7.0",
