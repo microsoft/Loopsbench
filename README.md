@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://loopsbench.ai"><img alt="Website" src="https://img.shields.io/badge/website-loopsbench.ai-0f766e?logo=googlechrome&logoColor=white"></a>
-  <a href="https://loopsbench.ai/api/"><img alt="API reference" src="https://img.shields.io/badge/API-reference-2563eb?logo=readthedocs&logoColor=white"></a>
+  <a href="https://loopsbench.ai/run"><img alt="API reference" src="https://img.shields.io/badge/API-reference-2563eb?logo=readthedocs&logoColor=white"></a>
   <a href="#citation"><img alt="arXiv coming soon" src="https://img.shields.io/badge/arXiv-coming%20soon-b31b1b.svg?logo=arxiv"></a>
   <a href="https://github.com/microsoft/Loopsbench/actions/workflows/pages.yml"><img alt="Pages" src="https://github.com/microsoft/Loopsbench/actions/workflows/pages.yml/badge.svg"></a>
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776ab?logo=python&logoColor=white">
@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://loopsbench.ai">Website</a> .
   <a href="https://loopsbench.ai/quickstart/">Quick Start</a> .
-  <a href="https://loopsbench.ai/api/">API Docs</a> .
+  <a href="https://loopsbench.ai/run">API Docs</a> .
   <a href="CONTRIBUTING.md">Contribute Tasks</a>
 </p>
 
@@ -176,7 +176,7 @@ image = resolve_task_docker_image(
 print(oracle.name(), image.client_image_ref)
 ```
 
-See the generated [API reference](https://loopsbench.ai/api/) for module-level documentation.
+See the generated [API reference](https://loopsbench.ai/run) for module-level documentation.
 
 ## Submit a Task
 
