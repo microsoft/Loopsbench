@@ -106,6 +106,29 @@ loopsbench run \
   --docker-image-tag latest
 ```
 
+## Run a Preinstalled External Agent
+
+Use `external-command` when the task image already contains a solver command.
+LoopsBench writes a versioned request inside the task container, invokes the
+configured argv with shell-escaped arguments, collects its result receipt, and then
+continues with the normal verifier and scoring flow.
+
+```bash
+loopsbench run \
+  --dataset-path tasks \
+  --task-id task_tcp_course_stack \
+  --agent external-command \
+  --agent-kwarg 'command=["loopx","benchmark","agent-phase","--execute","--solver-command-json","[\"solver\",\"--mode\",\"task\"]"]' \
+  --docker-image-strategy local-build
+```
+
+The external command receives `LOOPSBENCH_EXTERNAL_AGENT_REQUEST`,
+`LOOPSBENCH_EXTERNAL_AGENT_RESULT`, `LOOPSBENCH_EXTERNAL_AGENT_WORKSPACE`, and
+`LOOPSBENCH_EXTERNAL_AGENT_TIMEOUT_SECONDS`. It must write the
+`external_agent_result_v1` result to the supplied result path. This interface
+does not give the command verifier, score, submission, or task-provisioning
+authority.
+
 ## Review Results
 
 By default, run artifacts are written under `runs/<run-id>/`. Use:

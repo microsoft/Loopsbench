@@ -36,6 +36,10 @@ class AgentFactory:
             "loopsbench.agents.copilot.copilot_agent",
             "CopilotAgent",
         ),
+        AgentName.EXTERNAL_COMMAND: (
+            "loopsbench.agents.external_command_agent",
+            "ExternalCommandAgent",
+        ),
     }
 
     @classmethod
