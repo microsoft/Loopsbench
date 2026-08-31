@@ -12,7 +12,6 @@ from pydantic import UUID4, BaseModel, Field, computed_field
 from loopsbench.parsers.base_parser import UnitTestStatus
 from loopsbench.task_images.strategy import DockerImageStrategy
 
-
 # ---------------------------------------------------------------------------
 # Failure modes
 # ---------------------------------------------------------------------------
@@ -28,6 +27,7 @@ class FailureMode(str, Enum):
     AGENT_NETWORK_ERROR = "agent_network_error"
     AGENT_SERVER_ERROR = "agent_server_error"
     AGENT_STARTUP_ERROR = "agent_startup_error"
+    AGENT_SAFETY_ERROR = "agent_safety_error"
     TEST_TIMEOUT = "test_timeout"
     CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
     OUTPUT_LENGTH_EXCEEDED = "output_length_exceeded"

@@ -40,13 +40,26 @@ class TmuxSession:
         self._container_name = container_name
         self._logger = logger.getChild(__name__)
 
-        # Create the tmux session inside the container.
+        self._create_session()
+
+    def _create_session(self) -> None:
+        """Create this session in the current container generation."""
         # Use a very wide terminal so long commands (e.g. those that embed the
         # full task instruction ~1500 chars) never wrap.  If the command echo
         # wraps, the sentinel appended at the end can be split across two lines,
         # making pane.count(sentinel) == 1 instead of 2 and causing a timeout.
         # 10 000 columns is far wider than any command we send.
-        self._exec(f"tmux new-session -d -s {self._session_name} -x 10000 -y 50")
+        command = f"tmux new-session -d -s {self._session_name} -x 10000 -y 50"
+        exit_code, output = self._container.exec_run(
+            ["bash", "-c", command], demux=True
+        )
+        if int(exit_code) != 0:
+            stdout, stderr = output if isinstance(output, tuple) else (output, b"")
+            detail = ((stderr or stdout) or b"").decode(
+                "utf-8", errors="replace"
+            ).strip()
+            suffix = f": {detail[:300]}" if detail else ""
+            raise RuntimeError(f"Failed to create tmux session{suffix}")
 
     # -- low-level helpers --
 
@@ -59,6 +72,10 @@ class TmuxSession:
         return stdout
 
     # -- public API --
+
+    def recreate_after_container_restart(self) -> None:
+        """Recreate the tmux session after its container generation changes."""
+        self._create_session()
 
     def _append_command_log(self, keys: str) -> None:
         if self._commands_path is None:
@@ -199,7 +216,7 @@ class TmuxSession:
         if capture_entire:
             # Capture full scrollback into the tmux buffer, then read it.
             self._exec(f"tmux capture-pane -t {self._session_name} -S -")
-            return self._exec(f"tmux show-buffer")
+            return self._exec("tmux show-buffer")
         else:
             # Capture only the visible pane directly to stdout.
             return self._exec(

@@ -14,7 +14,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime, timezone
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +28,7 @@ from rich.progress import (
 
 from loopsbench.agents.agent_factory import AgentFactory
 from loopsbench.agents.agent_name import AgentName
-from loopsbench.agents.base_agent import AgentResult, BaseAgent
+from loopsbench.agents.base_agent import AgentResult, AgentSafetyError, BaseAgent
 from loopsbench.config import config as loopsbench_config
 from loopsbench.dataset.dataset import Dataset
 from loopsbench.handlers.trial_handler import TrialHandler
@@ -45,10 +44,21 @@ from loopsbench.harness.models import (
     build_run_metadata,
     write_task_image_resolution,
 )
+from loopsbench.harness.regression_harness import (
+    HarnessConfig as RegressionHarnessConfig,
+)
+from loopsbench.harness.regression_harness import (
+    RegressionHarness,
+)
 from loopsbench.parsers._pytest_tail_session import tail_case_id
 from loopsbench.parsers.base_parser import ParseContext, UnitTestStatus
 from loopsbench.parsers.parser_factory import ParserFactory, ResultFormat
-from loopsbench.utils.logger import logger
+from loopsbench.task_images.strategy import (
+    DockerImageStrategy,
+    effective_remote_docker_image_tag,
+    resolve_task_docker_image,
+    validate_remote_docker_image_coordinates,
+)
 from loopsbench.terminal.docker_compose_manager import (
     DockerComposeManager,
     DockerImageResolution,
@@ -60,16 +70,7 @@ from loopsbench.terminal.terminal import (
     TerminalStartupError,
     spin_up_terminal,
 )
-from loopsbench.harness.regression_harness import (
-    HarnessConfig as RegressionHarnessConfig,
-    RegressionHarness,
-)
-from loopsbench.task_images.strategy import (
-    DockerImageStrategy,
-    effective_remote_docker_image_tag,
-    resolve_task_docker_image,
-    validate_remote_docker_image_coordinates,
-)
+from loopsbench.utils.logger import logger
 
 # Merged with each task compose so the tester mounts host `tests/` + `run-tests.sh`.
 _REGRESSION_COMPOSE_PATH = Path(__file__).resolve().parent / "regression.compose.yaml"
@@ -1034,6 +1035,8 @@ PY
             if result is None:
                 return None, FailureMode.UNKNOWN_AGENT_ERROR
             return result, FailureMode(result.failure_mode)
+        except AgentSafetyError:
+            raise
         except Exception as exc:
             self._logger.error(
                 f"Error running agent for {handler.task_id}: {exc}"
@@ -1641,6 +1644,8 @@ PY
             failure_mode = (
                 FailureMode.AGENT_STARTUP_ERROR
                 if isinstance(exc, TerminalStartupError)
+                else FailureMode.AGENT_SAFETY_ERROR
+                if isinstance(exc, AgentSafetyError)
                 else FailureMode.UNKNOWN_AGENT_ERROR
             )
             self._logger.error(

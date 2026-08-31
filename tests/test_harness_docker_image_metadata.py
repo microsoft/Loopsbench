@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 import pytest
 
 from loopsbench.agents.agent_name import AgentName
+from loopsbench.agents.base_agent import AgentSafetyError
 from loopsbench.file_config.resolve import resolve_run_params
 from loopsbench.handlers.trial_handler import TrialHandler
 from loopsbench.harness.harness import Harness
@@ -422,3 +423,29 @@ def test_execute_single_trial_maps_terminal_startup_error(
     )
 
     assert result.failure_mode == FailureMode.AGENT_STARTUP_ERROR
+
+
+def test_execute_single_trial_maps_agent_safety_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_dir = tmp_path / "tasks" / "task_compiler"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.yaml").write_text("instruction: test instruction\n")
+    (task_dir / "docker-compose.yaml").write_text("services: {}\n")
+
+    harness = Harness.__new__(Harness)
+    harness._logger = logging.getLogger("test")
+    harness._output_path = tmp_path
+    harness._run_id = "runs"
+
+    def _boom(_handler: TrialHandler) -> None:
+        raise AgentSafetyError("containment was not drained")
+
+    monkeypatch.setattr(harness, "_run_trial", _boom)
+
+    result = harness._execute_single_trial(
+        "task_compiler.1-of-1.test_run", task_dir
+    )
+
+    assert result.failure_mode == FailureMode.AGENT_SAFETY_ERROR
