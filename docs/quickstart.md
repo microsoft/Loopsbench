@@ -129,6 +129,14 @@ The external command receives `LOOPSBENCH_EXTERNAL_AGENT_REQUEST`,
 does not give the command verifier, score, submission, or task-provisioning
 authority.
 
+`external-command` treats the task container as the runner-owned containment
+boundary. Before launch it rejects privileged containers, shared PID namespaces,
+and Docker-socket mounts. After normal completion or timeout, LoopsBench restarts
+the task container and verifies a new container generation before reading the
+result or starting the verifier. Workspace files persist across this drain, but
+shell state and background processes do not. If the drain cannot be verified, the
+trial records `agent_safety_error` and the verifier does not start.
+
 ## Review Results
 
 By default, run artifacts are written under `runs/<run-id>/`. Use:
