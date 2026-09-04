@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Generator
 
 from loopsbench.task_images.strategy import DockerImageStrategy
 from loopsbench.terminal.docker_compose_manager import (
+    ContainerAdmissionError,
     DockerComposeManager,
     DockerImageResolution,
 )
@@ -104,6 +105,7 @@ def spin_up_terminal(
     no_rebuild: bool = False,
     cleanup: bool = False,
     task_dir: Path | None = None,
+    external_command_isolation: bool = False,
 ) -> Generator[Terminal, None, None]:
     """Context manager: start compose stack -> yield Terminal -> tear down."""
     try:
@@ -120,7 +122,10 @@ def spin_up_terminal(
             logs_path=logs_path,
             agent_logs_path=agent_logs_path,
             task_dir=task_dir,
+            external_command_isolation=external_command_isolation,
         )
+    except ContainerAdmissionError:
+        raise
     except Exception as exc:
         raise TerminalStartupError(
             str(exc),
@@ -129,6 +134,11 @@ def spin_up_terminal(
 
     try:
         container = mgr.start()
+    except ContainerAdmissionError:
+        try:
+            mgr.stop()
+        finally:
+            raise
     except Exception as exc:
         mgr.stop()
         raise TerminalStartupError(

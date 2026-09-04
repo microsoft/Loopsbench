@@ -9,13 +9,13 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime, timezone
-from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from rich.progress import (
@@ -29,7 +29,7 @@ from rich.progress import (
 
 from loopsbench.agents.agent_factory import AgentFactory
 from loopsbench.agents.agent_name import AgentName
-from loopsbench.agents.base_agent import AgentResult, BaseAgent
+from loopsbench.agents.base_agent import AgentResult, AgentSafetyError, BaseAgent
 from loopsbench.config import config as loopsbench_config
 from loopsbench.dataset.dataset import Dataset
 from loopsbench.handlers.trial_handler import TrialHandler
@@ -45,11 +45,23 @@ from loopsbench.harness.models import (
     build_run_metadata,
     write_task_image_resolution,
 )
+from loopsbench.harness.regression_harness import (
+    HarnessConfig as RegressionHarnessConfig,
+)
+from loopsbench.harness.regression_harness import (
+    RegressionHarness,
+)
 from loopsbench.parsers._pytest_tail_session import tail_case_id
 from loopsbench.parsers.base_parser import ParseContext, UnitTestStatus
 from loopsbench.parsers.parser_factory import ParserFactory, ResultFormat
-from loopsbench.utils.logger import logger
+from loopsbench.task_images.strategy import (
+    DockerImageStrategy,
+    effective_remote_docker_image_tag,
+    resolve_task_docker_image,
+    validate_remote_docker_image_coordinates,
+)
 from loopsbench.terminal.docker_compose_manager import (
+    ContainerAdmissionError,
     DockerComposeManager,
     DockerImageResolution,
     docker_command,
@@ -60,21 +72,18 @@ from loopsbench.terminal.terminal import (
     TerminalStartupError,
     spin_up_terminal,
 )
-from loopsbench.harness.regression_harness import (
-    HarnessConfig as RegressionHarnessConfig,
-    RegressionHarness,
-)
-from loopsbench.task_images.strategy import (
-    DockerImageStrategy,
-    effective_remote_docker_image_tag,
-    resolve_task_docker_image,
-    validate_remote_docker_image_coordinates,
-)
+from loopsbench.utils.logger import logger
 
 # Merged with each task compose so the tester mounts host `tests/` + `run-tests.sh`.
 _REGRESSION_COMPOSE_PATH = Path(__file__).resolve().parent / "regression.compose.yaml"
 
 REGRESSION_POLL_INTERVAL_SEC = 15.0
+_EXTERNAL_COMMAND_PUBLIC_METADATA_FIELDS = (
+    "arm_id",
+    "expected_provider",
+    "provider_authority",
+    "integrity_policy_sha256",
+)
 
 
 class Harness:
@@ -140,9 +149,7 @@ class Harness:
             if incoming_tag_omitted:
                 self._docker_image_tag_defaulted = True
             elif docker_image_tag_defaulted is not None:
-                self._docker_image_tag_defaulted = bool(
-                    docker_image_tag_defaulted
-                )
+                self._docker_image_tag_defaulted = bool(docker_image_tag_defaulted)
             else:
                 self._docker_image_tag_defaulted = False
         else:
@@ -168,12 +175,30 @@ class Harness:
         # (see _run_agent_with_rate_limit_retries / _is_retryable_agent_failure).
         rl_retries = self._agent_kwargs.get("rate_limit_retries_per_round")
         if rl_retries is None:
-            rl_retries = int(os.environ.get("LOOPSBENCH_AGENT_RATE_LIMIT_RETRIES_PER_ROUND", "5"))
+            rl_retries = int(
+                os.environ.get(
+                    "LOOPSBENCH_AGENT_RATE_LIMIT_RETRIES_PER_ROUND",
+                    "0" if self._agent_name == AgentName.EXTERNAL_COMMAND else "5",
+                )
+            )
+        if self._agent_name == AgentName.EXTERNAL_COMMAND:
+            if (
+                isinstance(rl_retries, bool)
+                or not isinstance(rl_retries, int)
+                or rl_retries != 0
+            ):
+                raise AgentSafetyError(
+                    "external-command requires rate_limit_retries_per_round=0"
+                )
+            rl_retries = 0
         rl_backoff = self._agent_kwargs.get("rate_limit_backoff_sec")
         if rl_backoff is None:
-            rl_backoff = float(os.environ.get("LOOPSBENCH_AGENT_RATE_LIMIT_BACKOFF_SEC", "45"))
+            rl_backoff = float(
+                os.environ.get("LOOPSBENCH_AGENT_RATE_LIMIT_BACKOFF_SEC", "45")
+            )
         self._rate_limit_retries_per_round = max(0, int(rl_retries))
         self._rate_limit_backoff_sec = max(0.0, float(rl_backoff))
+        self._validate_external_command_attempt_policy()
 
         # Check if resuming
         self._is_resuming = self._run_path.exists()
@@ -230,7 +255,9 @@ class Harness:
             import_path=self._agent_import_path,
         )
 
-    def _create_agent_for_task(self, task_id: str) -> BaseAgent:
+    def _create_agent_for_task(
+        self, task_id: str, *, resolved_image_id: str | None = None
+    ) -> BaseAgent:
         kwargs = self._agent_kwargs.copy()
         if self._agent_name == AgentName.ORACLE:
             kwargs["dataset_path"] = (
@@ -239,11 +266,71 @@ class Harness:
                 else self._dataset_path
             )
             kwargs["task_ids"] = [task_id]
+        elif self._agent_name == AgentName.EXTERNAL_COMMAND:
+            kwargs = self._external_command_preseed_kwargs(task_id)
+            if not resolved_image_id:
+                raise AgentSafetyError("effective_container_image_unresolved")
+            kwargs["resolved_image_id"] = resolved_image_id
         return AgentFactory.get_agent(
             agent_name=self._agent_name,
             import_path=self._agent_import_path,
             **kwargs,
         )
+
+    def _validate_external_command_attempt_policy(self) -> None:
+        if self._agent_name != AgentName.EXTERNAL_COMMAND:
+            return
+        outer_loop_count = self._agent_kwargs.get("outer_loop_count", 1)
+        if (
+            isinstance(outer_loop_count, bool)
+            or not isinstance(outer_loop_count, int)
+            or outer_loop_count != 1
+        ):
+            raise AgentSafetyError("external-command requires outer_loop_count=1")
+        if self._rate_limit_retries_per_round != 0:
+            raise AgentSafetyError(
+                "external-command requires rate_limit_retries_per_round=0"
+            )
+
+    def _external_command_preseed_kwargs(self, task_id: str) -> dict[str, Any]:
+        kwargs = self._agent_kwargs.copy()
+        kwargs.update(
+            benchmark_id="loopsbench",
+            case_id=task_id,
+            run_id=self._run_id,
+            expected_model=self._model_name,
+        )
+        return kwargs
+
+    def _validate_external_command_preseed(self) -> None:
+        if self._agent_name != AgentName.EXTERNAL_COMMAND:
+            return
+        from loopsbench.agents.external_command_agent import ExternalCommandAgent
+
+        task_ids = tuple(getattr(self._dataset, "task_ids", ()))
+        for task_id in task_ids or ("metadata-preflight",):
+            ExternalCommandAgent.validate_preseed(
+                self._external_command_preseed_kwargs(task_id)
+            )
+
+    def _metadata_agent_kwargs(self) -> dict[str, Any]:
+        """Return only public-safe external inputs in run metadata."""
+        if self._agent_name != AgentName.EXTERNAL_COMMAND:
+            return self._agent_kwargs.copy()
+        from loopsbench.agents.external_command_agent import (
+            public_external_command_metadata,
+        )
+
+        metadata_kwargs = {
+            field: self._agent_kwargs[field]
+            for field in _EXTERNAL_COMMAND_PUBLIC_METADATA_FIELDS
+            if field in self._agent_kwargs
+        }
+        if "command" in self._agent_kwargs:
+            metadata_kwargs["command"] = public_external_command_metadata(
+                self._agent_kwargs["command"]
+            )
+        return metadata_kwargs
 
     def _init_logger(self) -> None:
         mode = "a" if self._is_resuming else "w"
@@ -359,7 +446,11 @@ PY
 
     def _start_patch_timeline_recorder(
         self, handler: TrialHandler, terminal: Terminal
-    ) -> tuple[threading.Thread, threading.Event]:
+    ) -> tuple[threading.Thread | None, threading.Event | None]:
+        if self._agent_name == AgentName.EXTERNAL_COMMAND:
+            # The external solver has one immutable snapshot boundary. A host
+            # thread must not race that boundary or inspect the removed client.
+            return None, None
         stop_event = threading.Event()
 
         def _loop() -> None:
@@ -397,7 +488,7 @@ PY
         "  1. `cd /workspace`\n"
         "  2. `git add -A`\n"
         "  3. `git diff --cached > requirement_patches/<slug>.diff`\n"
-        "  4. `git commit -m \"impl: <slug>\"`\n\n"
+        '  4. `git commit -m "impl: <slug>"`\n\n'
         "Where `<slug>` is the requirement filename without the `.yaml` extension.\n"
         "The patch file MUST be non-empty for the requirement to count as complete.\n"
         "Never write or `touch` an empty `.diff` file.\n\n"
@@ -406,7 +497,7 @@ PY
         "solution is accessible.\n"
     )
 
-    def _init_workspace_git(self, terminal: Terminal) -> None:
+    def _init_workspace_git(self, terminal: Terminal, strict: bool = False) -> None:
         """Init /workspace as a git repo with a single 'round 0' commit.
 
         Tasks ship without a ``.git/`` in ``base/``, so this is the only history
@@ -425,16 +516,26 @@ PY
             'git config user.name "loopsbench-agent" && '
             "git config commit.gpgsign false && "
             "git add -A && "
-            'git -c core.autocrlf=false commit -q --allow-empty '
+            "git -c core.autocrlf=false commit -q --allow-empty "
             '-m "round 0: initial workspace state"'
         )
         try:
             exit_code, output = container.exec_run(["bash", "-lc", cmd])
         except Exception as exc:  # pragma: no cover - defensive
+            if strict:
+                raise AgentSafetyError(
+                    "external_agent_workspace_git_init_failed"
+                ) from exc
             self._logger.warning(f"workspace git init raised: {exc}")
             return
         if exit_code != 0:
-            tail = output.decode("utf-8", errors="replace")[-400:] if isinstance(output, (bytes, bytearray)) else str(output)[-400:]
+            tail = (
+                output.decode("utf-8", errors="replace")[-400:]
+                if isinstance(output, (bytes, bytearray))
+                else str(output)[-400:]
+            )
+            if strict:
+                raise AgentSafetyError("external_agent_workspace_git_init_failed")
             self._logger.warning(f"workspace git init failed (rc={exit_code}): {tail}")
 
     def _persist_workspace_git(self, terminal: Terminal, handler: TrialHandler) -> None:
@@ -449,7 +550,11 @@ PY
             rc, out = container.exec_run(
                 ["bash", "-lc", "cd /workspace && git log --all --stat --date=iso 2>&1"]
             )
-            text = out.decode("utf-8", errors="replace") if isinstance(out, (bytes, bytearray)) else str(out or "")
+            text = (
+                out.decode("utf-8", errors="replace")
+                if isinstance(out, (bytes, bytearray))
+                else str(out or "")
+            )
             if rc != 0:
                 text = f"<git log failed rc={rc}>\n{text}"
             (out_dir / "git_log.txt").write_text(text)
@@ -459,10 +564,18 @@ PY
         try:
             in_container = "/tmp/loopsbench_workspace.bundle"
             rc, out = container.exec_run(
-                ["bash", "-lc", f"cd /workspace && git bundle create {in_container} --all 2>&1"]
+                [
+                    "bash",
+                    "-lc",
+                    f"cd /workspace && git bundle create {in_container} --all 2>&1",
+                ]
             )
             if rc != 0:
-                tail = out.decode("utf-8", errors="replace")[-400:] if isinstance(out, (bytes, bytearray)) else str(out)[-400:]
+                tail = (
+                    out.decode("utf-8", errors="replace")[-400:]
+                    if isinstance(out, (bytes, bytearray))
+                    else str(out)[-400:]
+                )
                 self._logger.warning(f"git bundle failed: {tail}")
                 return
             bits, _ = container.get_archive(in_container)
@@ -484,7 +597,7 @@ PY
         self, handler: TrialHandler, terminal: Terminal
     ) -> tuple[threading.Thread | None, RegressionHarness | None]:
         """Kick off DAG-triggered regression testing in a daemon thread."""
-        if self._agent_name == AgentName.ORACLE:
+        if self._agent_name in (AgentName.ORACLE, AgentName.EXTERNAL_COMMAND):
             return None, None
         if terminal.tester_container is None:
             return None, None
@@ -599,7 +712,11 @@ PY
             return
         dest.mkdir(parents=True, exist_ok=True)
         cp = subprocess.run(
-            [*docker_command(["cp", f"{handler.client_container_name}:{src}/.", str(dest)])],
+            [
+                *docker_command(
+                    ["cp", f"{handler.client_container_name}:{src}/.", str(dest)]
+                )
+            ],
             capture_output=True,
             text=True,
             env=docker_env(),
@@ -611,15 +728,11 @@ PY
             return
         try:
             count = sum(1 for _ in dest.rglob("*") if _.is_file())
-            self._logger.info(
-                f"{handler.task_id}: collected {count} {label} file(s)"
-            )
+            self._logger.info(f"{handler.task_id}: collected {count} {label} file(s)")
         except Exception:
             pass
 
-    def _collect_agent_tests(
-        self, handler: TrialHandler
-    ) -> None:
+    def _collect_agent_tests(self, handler: TrialHandler) -> None:
         """Copy /workspace/agent_tests/ from the client container to trial logs.
 
         This preserves any tests the agent chose to write (per the prompt
@@ -633,9 +746,7 @@ PY
             label="agent_tests",
         )
 
-    def _collect_agent_artifacts(
-        self, handler: TrialHandler
-    ) -> None:
+    def _collect_agent_artifacts(self, handler: TrialHandler) -> None:
         self._collect_container_dir(
             handler=handler,
             src="/workspace/agent_plans",
@@ -649,18 +760,88 @@ PY
             label="requirement_patches",
         )
 
+    def _collect_external_workspace_artifacts(
+        self, handler: TrialHandler, workspace_archive: bytes
+    ) -> None:
+        """Recover optional agent artifacts without reopening the client."""
+        from loopsbench.agents.external_command_agent import (
+            _MAX_WORKSPACE_EXPANDED_BYTES,
+            _MAX_WORKSPACE_MEMBER_BYTES,
+            validate_external_workspace_archive,
+        )
+
+        validate_external_workspace_archive(workspace_archive)
+        destinations = {
+            "agent_tests": handler.trial_paths.task_output_path / "agent_tests",
+            "agent_plans": handler.trial_paths.agent_plans_path,
+            "requirement_patches": handler.trial_paths.requirement_patches_path,
+        }
+        try:
+            with tarfile.open(
+                fileobj=io.BytesIO(workspace_archive), mode="r:*"
+            ) as bundle:
+                for member in bundle.getmembers():
+                    if not member.isfile():
+                        continue
+                    parts = PurePosixPath(member.name).parts
+                    if parts and parts[0] == "workspace":
+                        parts = parts[1:]
+                    if len(parts) < 2 or parts[0] not in destinations:
+                        continue
+                    if any(part in ("", ".", "..") for part in parts):
+                        raise AgentSafetyError(
+                            "external_agent_workspace_archive_invalid"
+                        )
+                    source = bundle.extractfile(member)
+                    if source is None:
+                        raise AgentSafetyError(
+                            "external_agent_workspace_archive_invalid"
+                        )
+                    destination = destinations[parts[0]].joinpath(*parts[1:])
+                    temporary_path: Path | None = None
+                    try:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        with tempfile.NamedTemporaryFile(
+                            dir=destination.parent,
+                            prefix=f".{destination.name}.",
+                            suffix=".tmp",
+                            delete=False,
+                        ) as output:
+                            temporary_path = Path(output.name)
+                            written = 0
+                            while chunk := source.read(64 * 1024):
+                                written += len(chunk)
+                                if (
+                                    written > _MAX_WORKSPACE_MEMBER_BYTES
+                                    or written > _MAX_WORKSPACE_EXPANDED_BYTES
+                                ):
+                                    raise AgentSafetyError(
+                                        "external_agent_workspace_archive_member_limit_exceeded"
+                                    )
+                                output.write(chunk)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        os.replace(temporary_path, destination)
+                    finally:
+                        if temporary_path is not None:
+                            temporary_path.unlink(missing_ok=True)
+        except AgentSafetyError:
+            raise
+        except (OSError, tarfile.TarError) as exc:
+            raise AgentSafetyError("external_agent_workspace_archive_invalid") from exc
+
     def _copy_container_file(
         self,
         handler: TrialHandler,
         src: str,
         dest: Path,
         label: str,
-        container_name: str | None = None,
+        container_ref: str | None = None,
     ) -> bool:
-        container_name = container_name or handler.client_container_name
+        container_ref = container_ref or handler.client_container_name
         check = subprocess.run(
             [
-                *docker_command(["exec", container_name, "sh", "-c"]),
+                *docker_command(["exec", container_ref, "sh", "-c"]),
                 f"test -f {src} && echo present",
             ],
             capture_output=True,
@@ -671,7 +852,7 @@ PY
             return False
         dest.parent.mkdir(parents=True, exist_ok=True)
         cp = subprocess.run(
-            [*docker_command(["cp", f"{container_name}:{src}", str(dest)])],
+            [*docker_command(["cp", f"{container_ref}:{src}", str(dest)])],
             capture_output=True,
             text=True,
             env=docker_env(),
@@ -694,13 +875,18 @@ PY
         handler: TrialHandler,
         results: TrialResults,
         post_test_pane: str,
+        *,
+        tester_container_ref: str | None = None,
     ) -> list[ResultArtifact]:
         artifacts: list[ResultArtifact] = []
         results.raw_output_paths = {
-            "pre_agent": str(handler.trial_paths.pre_agent_pane_path),
             "post_agent": str(handler.trial_paths.post_agent_pane_path),
             "post_test": str(handler.trial_paths.post_test_pane_path),
         }
+        if self._agent_name != AgentName.EXTERNAL_COMMAND:
+            results.raw_output_paths["pre_agent"] = str(
+                handler.trial_paths.pre_agent_pane_path
+            )
         artifacts.append(
             ResultArtifact(
                 name="post-test",
@@ -722,14 +908,22 @@ PY
             artifact_dest = handler.trial_paths.task_output_path / artifact_name
             collected = False
             if handler.tester_container_name is not None:
+                if self._agent_name == AgentName.EXTERNAL_COMMAND:
+                    if not tester_container_ref:
+                        raise AgentSafetyError(
+                            "external_agent_tester_container_identity_unavailable"
+                        )
+                    tester_ref = tester_container_ref
+                else:
+                    tester_ref = handler.tester_container_name
                 collected = self._copy_container_file(
                     handler,
                     source_container_path,
                     artifact_dest,
                     artifact_name,
-                    container_name=handler.tester_container_name,
+                    container_ref=tester_ref,
                 )
-            if not collected:
+            if not collected and self._agent_name != AgentName.EXTERNAL_COMMAND:
                 collected = self._copy_container_file(
                     handler,
                     source_container_path,
@@ -780,7 +974,11 @@ PY
                     source_name=artifact.name,
                     format=artifact.format,
                     artifact_path=artifact.path,
-                    raw_text=(post_test_pane if artifact.format == ResultFormat.TERMINAL_TEXT.value else None),
+                    raw_text=(
+                        post_test_pane
+                        if artifact.format == ResultFormat.TERMINAL_TEXT.value
+                        else None
+                    ),
                     task_id=handler.task_id,
                     is_fallback=source.fallback,
                 )
@@ -799,8 +997,12 @@ PY
         parsed_sets: list[ParsedResultSet],
     ) -> dict[str, UnitTestStatus] | None:
         final_results: dict[str, UnitTestStatus] = {}
-        case_level_sets = [parsed_set for parsed_set in parsed_sets if not parsed_set.is_summary_only]
-        summary_only_sets = [parsed_set for parsed_set in parsed_sets if parsed_set.is_summary_only]
+        case_level_sets = [
+            parsed_set for parsed_set in parsed_sets if not parsed_set.is_summary_only
+        ]
+        summary_only_sets = [
+            parsed_set for parsed_set in parsed_sets if parsed_set.is_summary_only
+        ]
 
         for parsed_set in [*case_level_sets, *summary_only_sets]:
             for case in parsed_set.cases:
@@ -810,51 +1012,109 @@ PY
         return final_results or None
 
     def _sync_workspace_to_tester(
-        self, terminal: Terminal, handler: TrialHandler
-    ) -> None:
+        self,
+        terminal: Terminal,
+        handler: TrialHandler,
+        *,
+        captured_workspace_archive: bytes | None = None,
+    ) -> str | None:
         tester = terminal.tester_container
         if tester is None:
-            return
+            return None
 
+        strict_external = self._agent_name == AgentName.EXTERNAL_COMMAND
         try:
-            tester.exec_run(
+            tester_container_id: str | None = None
+            if strict_external:
+                evidence = terminal.compose_manager.validate_live_tester()
+                tester_container_id = evidence.container_id
+                if getattr(tester, "id", None) not in (
+                    None,
+                    tester_container_id,
+                ):
+                    raise AgentSafetyError(
+                        "external_agent_tester_container_identity_mismatch"
+                    )
+            cleanup_exit_code, _ = tester.exec_run(
                 [
                     "sh",
                     "-lc",
                     "find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf {} +",
                 ]
             )
-            bits, _ = terminal._container.get_archive("/workspace")
-            archive = b"".join(bits)
-            tester.put_archive("/", archive)
+            if strict_external and int(cleanup_exit_code) != 0:
+                raise AgentSafetyError("external_agent_tester_workspace_cleanup_failed")
+            if strict_external:
+                if not captured_workspace_archive:
+                    raise AgentSafetyError("external_agent_workspace_archive_missing")
+                from loopsbench.agents.external_command_agent import (
+                    validate_external_workspace_archive,
+                )
+
+                validate_external_workspace_archive(captured_workspace_archive)
+                archive = captured_workspace_archive
+            else:
+                bits, _ = terminal._container.get_archive("/workspace")
+                archive = b"".join(bits)
+            transferred = tester.put_archive("/", archive)
+            if strict_external and transferred is not True:
+                raise AgentSafetyError("external_agent_workspace_transfer_failed")
+            return tester_container_id
+        except AgentSafetyError:
+            raise
         except Exception as exc:
+            if strict_external:
+                raise AgentSafetyError(
+                    "external_agent_workspace_transfer_failed"
+                ) from exc
             self._logger.warning(
                 f"{handler.task_id}: failed to sync workspace to tester: {exc}"
             )
+            return None
 
     def _run_tests(
         self,
         terminal: Terminal,
         session,
         handler: TrialHandler,
-    ) -> FailureMode:
+        *,
+        captured_workspace_archive: bytes | None = None,
+    ) -> tuple[FailureMode, str | None]:
         timeout = (
             self._global_test_timeout_sec
             or handler.task.max_test_timeout_sec * self._global_timeout_multiplier
         )
 
         if terminal.tester_container is None:
+            if self._agent_name == AgentName.EXTERNAL_COMMAND:
+                raise AgentSafetyError(
+                    f"{handler.task_id}: external_agent_tester_container_missing"
+                )
             self._logger.warning(
                 f"{handler.task_id}: tester container is required for direct test execution"
             )
-            return FailureMode.UNKNOWN_AGENT_ERROR
+            return FailureMode.UNKNOWN_AGENT_ERROR, None
 
-        self._sync_workspace_to_tester(terminal, handler)
+        admitted_tester_id = self._sync_workspace_to_tester(
+            terminal,
+            handler,
+            captured_workspace_archive=captured_workspace_archive,
+        )
 
         from loopsbench.harness.test_runner import TestRunner
 
+        if self._agent_name == AgentName.EXTERNAL_COMMAND:
+            current_tester = terminal.compose_manager.validate_live_tester()
+            if admitted_tester_id != current_tester.container_id:
+                raise AgentSafetyError(
+                    "external_agent_tester_container_identity_mismatch"
+                )
+            tester_target = current_tester.container_id
+        else:
+            tester_target = handler.tester_container_name
+
         runner = TestRunner(
-            tester_container=handler.tester_container_name,
+            tester_container=tester_target,
             workspace_mount="/workspace",
             tests_dir=str(DockerComposeManager.CONTAINER_TEST_DIR),
         )
@@ -875,16 +1135,14 @@ PY
             self._logger.warning(
                 f"Tests timed out after {timeout}s for {handler.task_id}"
             )
-            return FailureMode.TEST_TIMEOUT
+            return FailureMode.TEST_TIMEOUT, admitted_tester_id
         if result.exit_code != 0:
             self._logger.info(
                 f"{handler.task_id}: direct run-tests.sh exited with {result.exit_code}"
             )
-        return FailureMode.NONE
+        return FailureMode.NONE, admitted_tester_id
 
-    def _is_resolved(
-        self, parser_results: dict[str, UnitTestStatus] | None
-    ) -> bool:
+    def _is_resolved(self, parser_results: dict[str, UnitTestStatus] | None) -> bool:
         if not parser_results:
             return False
         tail_id = tail_case_id()
@@ -896,8 +1154,7 @@ PY
         if not any(s == UnitTestStatus.PASSED for s in statuses):
             return False
         return all(
-            r in (UnitTestStatus.PASSED, UnitTestStatus.SKIPPED)
-            for r in statuses
+            r in (UnitTestStatus.PASSED, UnitTestStatus.SKIPPED) for r in statuses
         )
 
     def _log_failed_tests(
@@ -950,9 +1207,7 @@ PY
                 with tarfile.open(fileobj=io.BytesIO(data)) as tar:
                     tar.extractall(traj_dir)
                 extracted.append(cpath)
-                self._logger.info(
-                    f"Extracted trajectory: {cpath} -> {traj_dir}"
-                )
+                self._logger.info(f"Extracted trajectory: {cpath} -> {traj_dir}")
             except Exception as exc:
                 message = str(exc)
                 if "Not Found" in message:
@@ -962,9 +1217,7 @@ PY
                     )
                 else:
                     errors.append(f"{cpath}: {message}")
-                    self._logger.warning(
-                        f"Could not extract trajectory {cpath}: {exc}"
-                    )
+                    self._logger.warning(f"Could not extract trajectory {cpath}: {exc}")
         return {
             "expected": True,
             "requested": traj_paths,
@@ -987,7 +1240,11 @@ PY
             return current_failure_mode
         if agent_result is None:
             return FailureMode.AGENT_STARTUP_ERROR
-        if current_failure_mode in (FailureMode.UNSET, FailureMode.NONE, FailureMode.UNKNOWN_AGENT_ERROR):
+        if current_failure_mode in (
+            FailureMode.UNSET,
+            FailureMode.NONE,
+            FailureMode.UNKNOWN_AGENT_ERROR,
+        ):
             return FailureMode.AGENT_STARTUP_ERROR
         return current_failure_mode
 
@@ -1033,11 +1290,14 @@ PY
             )
             if result is None:
                 return None, FailureMode.UNKNOWN_AGENT_ERROR
-            return result, FailureMode(result.failure_mode)
+            failure_mode = FailureMode(result.failure_mode)
+            if failure_mode == FailureMode.AGENT_SAFETY_ERROR:
+                raise AgentSafetyError(result.failure_mode)
+            return result, failure_mode
+        except AgentSafetyError:
+            raise
         except Exception as exc:
-            self._logger.error(
-                f"Error running agent for {handler.task_id}: {exc}"
-            )
+            self._logger.error(f"Error running agent for {handler.task_id}: {exc}")
             return None, FailureMode.UNKNOWN_AGENT_ERROR
 
     def _run_agent_with_rate_limit_retries(
@@ -1061,7 +1321,9 @@ PY
         agent_fm = FailureMode.NONE
         for attempt in range(max_attempts):
             attempt_dir = (
-                logging_dir if attempt == 0 else logging_dir / f"rate-limit-retry-{attempt}"
+                logging_dir
+                if attempt == 0
+                else logging_dir / f"rate-limit-retry-{attempt}"
             )
             attempt_dir.mkdir(parents=True, exist_ok=True)
             agent_result, agent_fm = self._run_agent(
@@ -1164,7 +1426,9 @@ PY
         history_path = self._outer_loop_history_path(handler)
         history_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            relative_logging_dir = logging_dir.relative_to(handler.trial_paths.task_output_path)
+            relative_logging_dir = logging_dir.relative_to(
+                handler.trial_paths.task_output_path
+            )
         except ValueError:
             relative_logging_dir = logging_dir
         payload = {
@@ -1179,11 +1443,15 @@ PY
         with history_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload) + "\n")
 
-    def _promote_round_artifacts(self, round_logging_dir: Path, base_logging_dir: Path) -> None:
+    def _promote_round_artifacts(
+        self, round_logging_dir: Path, base_logging_dir: Path
+    ) -> None:
         if round_logging_dir == base_logging_dir or not round_logging_dir.exists():
             return
         for relative_path in (
             Path("claude_sdk_result.json"),
+            Path("trajectories") / "result.public.json",
+            Path("trajectories") / "containment.public.json",
             Path("trajectories") / "claude_sdk_trajectory.jsonl",
             Path("trajectories") / "qwen_code_stream.jsonl",
         ):
@@ -1321,6 +1589,8 @@ PY
         total_output_tokens = 0
         last_agent = None
         last_session = None
+        external_workspace_archive: bytes | None = None
+        external_client_destroyed = False
         executed_cycles = 0
 
         compose_files: list[Path] = [handler.docker_compose_path]
@@ -1332,6 +1602,15 @@ PY
             docker_image_namespace=self._docker_image_namespace,
             docker_image_tag=self._docker_image_tag,
         )
+        if self._agent_name == AgentName.EXTERNAL_COMMAND:
+            self._validate_external_command_attempt_policy()
+            # Preseed is runner-owned and happens before Compose can execute any
+            # task-controlled provisioning. Postseed is validated by the agent
+            # against the effective running container immediately before launch.
+            preseed_kwargs = self._external_command_preseed_kwargs(handler.task_id)
+            from loopsbench.agents.external_command_agent import ExternalCommandAgent
+
+            ExternalCommandAgent.validate_preseed(preseed_kwargs)
         self._write_task_image_resolution_artifact(handler, resolved_image)
 
         terminal_cm = spin_up_terminal(
@@ -1348,6 +1627,7 @@ PY
             no_rebuild=self._no_rebuild,
             cleanup=self._cleanup,
             task_dir=handler.task_dir.resolve(),
+            external_command_isolation=(self._agent_name == AgentName.EXTERNAL_COMMAND),
         )
         with ExitStack() as stack:
             try:
@@ -1371,9 +1651,12 @@ PY
                 image_resolution=terminal.compose_manager.image_resolution,
             )
             first_session = terminal.create_session("agent-1")
-            self._init_workspace_git(terminal)
-            pre_pane = first_session.capture_pane(capture_entire=True)
-            handler.trial_paths.pre_agent_pane_path.write_text(pre_pane)
+            self._init_workspace_git(
+                terminal, strict=self._agent_name == AgentName.EXTERNAL_COMMAND
+            )
+            if self._agent_name != AgentName.EXTERNAL_COMMAND:
+                pre_pane = first_session.capture_pane(capture_entire=True)
+                handler.trial_paths.pre_agent_pane_path.write_text(pre_pane)
 
             patch_thread, patch_stop_event = self._start_patch_timeline_recorder(
                 handler, terminal
@@ -1385,12 +1668,19 @@ PY
             try:
                 deadline = time.monotonic() + total_agent_budget
 
-                if self._agent_name == AgentName.ORACLE:
-                    # Single-shot reference solution: no outer loop, no progress wrapping,
-                    # no outer_loop_history.jsonl rounds.
+                if self._agent_name in (AgentName.ORACLE, AgentName.EXTERNAL_COMMAND):
+                    # Safety-gated agents are single-shot: no outer loop, progress
+                    # wrapping, or outer_loop_history.jsonl rounds. External command
+                    # also bypasses result-conditioned rate-limit retries so one trial
+                    # maps to exactly one solver invocation.
                     session = first_session
                     last_session = session
-                    last_agent = self._create_agent_for_task(handler.task_id)
+                    last_agent = self._create_agent_for_task(
+                        handler.task_id,
+                        resolved_image_id=(
+                            terminal.compose_manager.image_resolution.resolved_image_id
+                        ),
+                    )
                     remaining_agent_budget = deadline - time.monotonic()
                     if remaining_agent_budget <= 0:
                         results.failure_mode = FailureMode.AGENT_TIMEOUT
@@ -1411,20 +1701,79 @@ PY
                             results.agent_started_at = datetime.now(
                                 timezone.utc
                             ).isoformat()
-                        agent_result, agent_fm = (
-                            self._run_agent_with_rate_limit_retries(
-                                session,
-                                handler,
-                                last_agent,
+                        if self._agent_name == AgentName.EXTERNAL_COMMAND:
+                            from loopsbench.agents.external_command_agent import (
+                                ExternalCommandAgent,
+                            )
+
+                            if not isinstance(last_agent, ExternalCommandAgent):
+                                raise AgentSafetyError(
+                                    "external_agent_snapshot_owner_invalid"
+                                )
+                            client_evidence = (
+                                terminal.compose_manager.validate_live_client()
+                            )
+                            last_agent.perform_task_with_evidence(
                                 base_instruction,
+                                session,
                                 logging_dir=round_logging_dir,
                                 timeout_sec=round_timeout_sec,
+                                effective_container_evidence=client_evidence,
                             )
-                        )
+                            snapshot = last_agent.snapshot
+                            if snapshot is None:
+                                raise AgentSafetyError(
+                                    "external_agent_snapshot_missing"
+                                )
+                            # All runner-owned client state was captured while
+                            # paused. Removal is the irreversible trust boundary:
+                            # no result parsing or verifier work may precede it.
+                            try:
+                                terminal.compose_manager.destroy_external_client(
+                                    expected_container_id=snapshot.container_id
+                                )
+                            except ContainerAdmissionError as exc:
+                                raise AgentSafetyError(
+                                    "external_agent_client_destroy_failed"
+                                ) from exc
+                            external_client_destroyed = True
+                            last_agent.persist_containment_absence_proof(
+                                snapshot,
+                                container_name=handler.client_container_name,
+                            )
+                            if snapshot.snapshot_error is not None:
+                                raise snapshot.snapshot_error
+                            if snapshot.workspace_archive is None:
+                                raise AgentSafetyError(
+                                    "external_agent_workspace_archive_missing"
+                                )
+                            external_workspace_archive = snapshot.workspace_archive
+                            # Solver stdout/stderr is private and unbounded. Keep only
+                            # a fixed host-side diagnostic sentinel.
+                            post_agent = snapshot.post_agent_pane
+                            handler.trial_paths.post_agent_pane_path.write_text(
+                                post_agent
+                            )
+                            agent_result = last_agent.finalize_snapshot(snapshot)
+                            agent_fm = FailureMode(agent_result.failure_mode)
+                        else:
+                            agent_result, agent_fm = (
+                                self._run_agent_with_rate_limit_retries(
+                                    session,
+                                    handler,
+                                    last_agent,
+                                    base_instruction,
+                                    logging_dir=round_logging_dir,
+                                    timeout_sec=round_timeout_sec,
+                                )
+                            )
                         results.agent_ended_at = datetime.now(timezone.utc).isoformat()
 
-                        post_agent = session.capture_pane(capture_entire=True)
-                        handler.trial_paths.post_agent_pane_path.write_text(post_agent)
+                        if self._agent_name != AgentName.EXTERNAL_COMMAND:
+                            post_agent = session.capture_pane(capture_entire=True)
+                            handler.trial_paths.post_agent_pane_path.write_text(
+                                post_agent
+                            )
 
                         executed_cycles += 1
                         if agent_result is not None:
@@ -1433,11 +1782,23 @@ PY
                         results.total_input_tokens = total_input_tokens
                         results.total_output_tokens = total_output_tokens
                         results.failure_mode = (
-                            agent_fm if agent_fm != FailureMode.NONE else FailureMode.NONE
+                            agent_fm
+                            if agent_fm != FailureMode.NONE
+                            else FailureMode.NONE
                         )
 
-                        extraction = self._extract_trajectories(
-                            terminal, last_agent, round_logging_dir
+                        extraction = (
+                            {
+                                "expected": False,
+                                "requested": [],
+                                "extracted": [],
+                                "missing": [],
+                                "errors": [],
+                            }
+                            if self._agent_name == AgentName.EXTERNAL_COMMAND
+                            else self._extract_trajectories(
+                                terminal, last_agent, round_logging_dir
+                            )
                         )
                         self._promote_round_artifacts(
                             round_logging_dir, handler.trial_paths.agent_logging_dir
@@ -1448,7 +1809,13 @@ PY
                             results.failure_mode,
                         )
 
-                        self._collect_agent_artifacts(handler)
+                        if self._agent_name == AgentName.EXTERNAL_COMMAND:
+                            assert external_workspace_archive is not None
+                            self._collect_external_workspace_artifacts(
+                                handler, external_workspace_archive
+                            )
+                        else:
+                            self._collect_agent_artifacts(handler)
                 else:
                     cycle_index = 1
                     unbounded_outer = self._outer_loop_unbounded()
@@ -1462,7 +1829,12 @@ PY
                             else terminal.create_session(f"agent-{cycle_index}")
                         )
                         last_session = session
-                        last_agent = self._create_agent_for_task(handler.task_id)
+                        last_agent = self._create_agent_for_task(
+                            handler.task_id,
+                            resolved_image_id=(
+                                terminal.compose_manager.image_resolution.resolved_image_id
+                            ),
+                        )
                         remaining_agent_budget = deadline - time.monotonic()
                         instruction = self._build_progress_instruction(
                             base_instruction, progress_before
@@ -1510,7 +1882,9 @@ PY
                         results.total_input_tokens = total_input_tokens
                         results.total_output_tokens = total_output_tokens
                         results.failure_mode = (
-                            agent_fm if agent_fm != FailureMode.NONE else FailureMode.NONE
+                            agent_fm
+                            if agent_fm != FailureMode.NONE
+                            else FailureMode.NONE
                         )
 
                         extraction = self._extract_trajectories(
@@ -1545,10 +1919,25 @@ PY
                 if last_session is None:
                     last_session = first_session
                 if last_agent is None:
-                    last_agent = self._create_agent_for_task(handler.task_id)
+                    last_agent = self._create_agent_for_task(
+                        handler.task_id,
+                        resolved_image_id=(
+                            terminal.compose_manager.image_resolution.resolved_image_id
+                        ),
+                    )
 
-                extraction = self._extract_trajectories(
-                    terminal, last_agent, handler.trial_paths.agent_logging_dir
+                extraction = (
+                    {
+                        "expected": False,
+                        "requested": [],
+                        "extracted": [],
+                        "missing": [],
+                        "errors": [],
+                    }
+                    if self._agent_name == AgentName.EXTERNAL_COMMAND
+                    else self._extract_trajectories(
+                        terminal, last_agent, handler.trial_paths.agent_logging_dir
+                    )
                 )
                 if results.failure_mode in (FailureMode.UNSET, FailureMode.NONE):
                     results.failure_mode = self._classify_missing_trajectory(
@@ -1557,23 +1946,53 @@ PY
                         results.failure_mode,
                     )
 
-                test_session = last_session
-                if not handler.task.run_tests_in_same_shell:
+                if self._agent_name == AgentName.EXTERNAL_COMMAND:
+                    if not external_client_destroyed:
+                        raise AgentSafetyError("external_agent_client_destroy_unproven")
+                    if terminal.tester_container is None:
+                        raise AgentSafetyError(
+                            f"{handler.task_id}: "
+                            "external_agent_tester_container_missing"
+                        )
+                    test_session = terminal.create_session(
+                        f"tests-{max(executed_cycles, 1)}",
+                        use_tester=True,
+                    )
+                else:
+                    test_session = last_session
+                if (
+                    self._agent_name != AgentName.EXTERNAL_COMMAND
+                    and not handler.task.run_tests_in_same_shell
+                ):
                     test_session = terminal.create_session(
                         f"tests-{max(executed_cycles, 1)}",
                         use_tester=terminal.tester_container is not None,
                     )
 
                 results.test_started_at = datetime.now(timezone.utc).isoformat()
-                test_fm = self._run_tests(terminal, test_session, handler)
+                if self._agent_name == AgentName.EXTERNAL_COMMAND:
+                    test_fm, tester_container_ref = self._run_tests(
+                        terminal,
+                        test_session,
+                        handler,
+                        captured_workspace_archive=external_workspace_archive,
+                    )
+                else:
+                    test_fm, tester_container_ref = self._run_tests(
+                        terminal, test_session, handler
+                    )
                 results.test_ended_at = datetime.now(timezone.utc).isoformat()
                 post_test = handler.trial_paths.post_test_pane_path.read_text()
 
                 if test_fm != FailureMode.NONE:
-                    if results.failure_mode == FailureMode.UNSET:
-                        results.failure_mode = test_fm
+                    results.failure_mode = test_fm
                 else:
-                    artifacts = self._collect_result_artifacts(handler, results, post_test)
+                    artifacts = self._collect_result_artifacts(
+                        handler,
+                        results,
+                        post_test,
+                        tester_container_ref=tester_container_ref,
+                    )
                     parsed_result_sets, parse_fm = self._parse_result_artifacts(
                         handler, artifacts, post_test
                     )
@@ -1599,9 +2018,10 @@ PY
                     patch_thread, patch_stop_event, handler, terminal
                 )
                 results.regression_results = reg_results
-                self._collect_agent_tests(handler)
-                self._collect_agent_artifacts(handler)
-                self._persist_workspace_git(terminal, handler)
+                if self._agent_name != AgentName.EXTERNAL_COMMAND:
+                    self._collect_agent_tests(handler)
+                    self._collect_agent_artifacts(handler)
+                    self._persist_workspace_git(terminal, handler)
 
         if results.is_resolved:
             self._logger.debug(f"Resolved task {handler.task_id}")
@@ -1614,9 +2034,7 @@ PY
 
     # -- orchestration --
 
-    def _execute_single_trial(
-        self, trial_name: str, task_path: Path
-    ) -> TrialResults:
+    def _execute_single_trial(self, trial_name: str, task_path: Path) -> TrialResults:
         try:
             handler = TrialHandler(
                 trial_name=trial_name,
@@ -1641,6 +2059,8 @@ PY
             failure_mode = (
                 FailureMode.AGENT_STARTUP_ERROR
                 if isinstance(exc, TerminalStartupError)
+                else FailureMode.AGENT_SAFETY_ERROR
+                if isinstance(exc, (AgentSafetyError, ContainerAdmissionError))
                 else FailureMode.UNKNOWN_AGENT_ERROR
             )
             self._logger.error(
@@ -1666,9 +2086,7 @@ PY
             )
             return combined.results
         except Exception as exc:
-            self._logger.warning(
-                f"Failed to load {self._results_output_path}: {exc}"
-            )
+            self._logger.warning(f"Failed to load {self._results_output_path}: {exc}")
             return []
 
     def _load_previous_results(self) -> BenchmarkResults | None:
@@ -1739,8 +2157,7 @@ PY
                     TimeElapsedColumn(),
                 ) as progress:
                     task = progress.add_task(
-                        f"Running tasks (0/{total}, "
-                        f"Accuracy: {results.accuracy:.2%})",
+                        f"Running tasks (0/{total}, Accuracy: {results.accuracy:.2%})",
                         total=total,
                     )
                     for fut in as_completed(futures):
@@ -1774,9 +2191,7 @@ PY
                         self._write_results(results)
 
                         done = len(results.results)
-                        status = (
-                            "✓" if trial_result.is_resolved else "✗"
-                        )
+                        status = "✓" if trial_result.is_resolved else "✗"
                         progress.update(
                             task,
                             advance=1,
@@ -1792,9 +2207,7 @@ PY
     # -- write helpers --
 
     def _write_results(self, results: BenchmarkResults) -> None:
-        self._results_output_path.write_text(
-            results.model_dump_json(indent=4)
-        )
+        self._results_output_path.write_text(results.model_dump_json(indent=4))
 
     def _get_git_commit_hash(self) -> str:
         try:
@@ -1831,6 +2244,7 @@ PY
             return "unknown"
 
     def _write_run_metadata(self) -> None:
+        self._validate_external_command_preseed()
         metadata = build_run_metadata(
             run_id=self._run_id,
             dataset_path=(
@@ -1860,11 +2274,9 @@ PY
             username=self._get_user(),
             start_time=self._start_time,
             s3_bucket=loopsbench_config.s3_bucket_name,
-            agent_kwargs=self._agent_kwargs,
+            agent_kwargs=self._metadata_agent_kwargs(),
         )
-        self._run_metadata_output_path.write_text(
-            metadata.model_dump_json(indent=4)
-        )
+        self._run_metadata_output_path.write_text(metadata.model_dump_json(indent=4))
 
     def _update_metadata_on_end(self, results: BenchmarkResults) -> None:
         if self._run_metadata_output_path.exists():

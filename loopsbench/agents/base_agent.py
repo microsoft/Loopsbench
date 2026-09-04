@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field
 from loopsbench.terminal.tmux_session import TmuxSession
 
 
+class AgentSafetyError(RuntimeError):
+    """Agent effects may still be active, so verification must not start."""
+
+
 class AgentResult(BaseModel):
     """Result returned by an agent after performing a task."""
 

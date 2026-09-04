@@ -15,3 +15,4 @@ class AgentName(str, Enum):
     CODEX = "codex"
     QWEN_CODE = "qwen-code"
     COPILOT = "copilot"
+    EXTERNAL_COMMAND = "external-command"
