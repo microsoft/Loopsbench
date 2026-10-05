@@ -16,10 +16,10 @@ services:
     container_name: ${LOOPSBENCH_TASK_DOCKER_CLIENT_CONTAINER_NAME}_tester
     command: ["sh", "-c", "sleep infinity"]
     volumes:
-      - loopsbench_shared:/shared
+      - loopsbench_shared:/shared:ro
       - ${LOOPSBENCH_TASK_DIR}/tests:/tests:ro
       - ${LOOPSBENCH_TASK_DIR}/run-tests.sh:/task-assets/run-tests.sh:ro
-      - ${LOOPSBENCH_TASK_DIR}:/task-assets/task:ro
+      - ${LOOPSBENCH_TASK_DIR}/base:/task-assets/base:ro
     depends_on:
       - client
     extra_hosts:

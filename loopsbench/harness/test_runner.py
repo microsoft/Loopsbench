@@ -2,18 +2,14 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from loopsbench.parsers._pytest_nested_filter import should_skip_nested_pytest_nodeid
 from loopsbench.parsers._text_utils import normalize_terminal_text
 from loopsbench.terminal.docker_compose_manager import docker_command, docker_env
-
-# Written inside the tester workspace; collected via ``docker cp`` so logs are not
-# truncated by host-side ``subprocess`` capture limits.
-TEST_OUTPUT_LOG_NAME = ".loopsbench-run-tests-output.txt"
 
 
 @dataclass
@@ -51,45 +47,6 @@ class TestRunner:
         self.script_path = script_path
         self._bootstrapped = False
 
-    def _container_test_log_path(self) -> str:
-        return (Path(self.workspace_mount) / TEST_OUTPUT_LOG_NAME).as_posix()
-
-    def _docker_cp_from_container(self, container_path: str, host_path: Path) -> bool:
-        cp = subprocess.run(
-            [
-                *docker_command(
-                    ["cp", f"{self.tester_container}:{container_path}", str(host_path)]
-                )
-            ],
-            capture_output=True,
-            text=True,
-            env=docker_env(),
-        )
-        return cp.returncode == 0 and host_path.is_file()
-
-    def _read_test_log_from_container(self, exec_stdout: str, exec_stderr: str) -> tuple[str, str]:
-        """Return (combined_log_text, docker_exec_stderr) from container log file.
-
-        Falls back to *exec_stdout* when ``docker cp`` fails (e.g. container died).
-        """
-        log_path = self._container_test_log_path()
-        tmp = tempfile.NamedTemporaryFile(
-            prefix="loopsbench-test-log-", suffix=".txt", delete=False
-        )
-        tmp_path = Path(tmp.name)
-        tmp.close()
-        try:
-            if self._docker_cp_from_container(log_path, tmp_path):
-                text = tmp_path.read_text(encoding="utf-8", errors="replace")
-                return text, exec_stderr
-        finally:
-            tmp_path.unlink(missing_ok=True)
-        # Preserve any docker-exec stdout (wrapper messages) ahead of captured stdout.
-        merged = exec_stdout or ""
-        if exec_stderr:
-            merged = f"# --- docker exec stderr ---\n{exec_stderr}\n" + merged
-        return merged, exec_stderr
-
     def bootstrap(self) -> None:
         if self._bootstrapped:
             return
@@ -115,66 +72,48 @@ class TestRunner:
         mode: str = "run_tests_sh",
     ) -> TestRunResult:
         self.bootstrap()
+        workspace = shlex.quote(self.workspace_mount)
+        snapshot = shlex.quote(snapshot_path)
         prepare_workspace = ""
         if snapshot_path != self.workspace_mount:
             prepare_workspace = (
-                f"find {self.workspace_mount} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null || true; "
-                f"rsync -a {snapshot_path}/ {self.workspace_mount}/ 2>/dev/null || "
-                f"cp -a {snapshot_path}/. {self.workspace_mount}/; "
+                f"find {workspace} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +; "
+                f"rsync -a {snapshot}/ {workspace}/ 2>/dev/null || "
+                f"cp -a {snapshot}/. {workspace}/; "
             )
         script = (
-            f"{prepare_workspace}"
-            f"cd {self.workspace_mount} && (git init -q 2>/dev/null; git add -A 2>/dev/null; "
-            f"git -c user.email=b@b -c user.name=b commit -q -m snap --allow-empty 2>/dev/null) || true; "
-            f"RUN_TESTS_SCRIPT={self.script_path}; "
-            f"test -f \"$RUN_TESTS_SCRIPT\" || RUN_TESTS_SCRIPT={self.tests_dir}/run-tests.sh; "
-            f"export REPO_DIR={self.workspace_mount}; "
-            f"export TEST_DIR={self.tests_dir}; "
-            f"export UNIT_TEST_DIR={self.tests_dir}; "
-            f"export REPO_DIR_OVERRIDE={self.workspace_mount}; "
-            f"LOOPSBENCH_TEST_LOG={self.workspace_mount}/{TEST_OUTPUT_LOG_NAME}; "
-            f"rm -f \"$LOOPSBENCH_TEST_LOG\"; "
+            f"set -e; {prepare_workspace}"
+            f"cd {workspace}; (git init -q 2>/dev/null; git add -A 2>/dev/null; "
+            f"git -c core.hooksPath=/dev/null -c user.email=b@b -c user.name=b commit -q -m snap --allow-empty >/dev/null 2>&1) || true; "
+            f"RUN_TESTS_SCRIPT={shlex.quote(self.script_path)}; "
+            f"test -f \"$RUN_TESTS_SCRIPT\" || RUN_TESTS_SCRIPT={shlex.quote(self.tests_dir + '/run-tests.sh')}; "
+            f"export REPO_DIR={workspace}; "
+            f"export TEST_DIR={shlex.quote(self.tests_dir)}; "
+            f"export UNIT_TEST_DIR={shlex.quote(self.tests_dir)}; "
+            f"export REPO_DIR_OVERRIDE={workspace}; "
+            "export SEGPIPE_BASE_ROOT=/task-assets/base; "
             f"if ! test -f \"$RUN_TESTS_SCRIPT\"; then "
             f"echo 'loopsbench: missing run-tests (expected {self.script_path} or {self.tests_dir}/run-tests.sh)' "
-            f">\"$LOOPSBENCH_TEST_LOG\"; echo __EXIT__127 >>\"$LOOPSBENCH_TEST_LOG\"; exit 0; fi; "
-            f"chmod +x \"$RUN_TESTS_SCRIPT\" 2>/dev/null || true; "
-            f"set +e; bash \"$RUN_TESTS_SCRIPT\" >\"$LOOPSBENCH_TEST_LOG\" 2>&1; ec=$?; "
-            f"echo \"__EXIT__${{ec}}\" >>\"$LOOPSBENCH_TEST_LOG\"; exit \"$ec\""
+            f"; exit 127; fi; "
+            'exec bash "$RUN_TESTS_SCRIPT"'
         )
         cmd = [*docker_command(["exec", self.tester_container, "bash", "-c"]), script]
-        r: subprocess.CompletedProcess[str] | None = None
-        try:
-            r = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-                env=docker_env(),
-            )
-        except subprocess.TimeoutExpired as e:
-            stderr_parts = [str(e.stderr or "").rstrip(), "loopsbench: subprocess timeout"]
-            stderr = "\n".join(p for p in stderr_parts if p)
-            raw_out, stderr = self._read_test_log_from_container(
-                str(e.stdout or ""),
-                stderr,
-            )
-            out = normalize_terminal_text(raw_out)
-            result = TestRunResult(
-                exit_code=124,
-                raw_stdout=out,
-                raw_stderr=stderr or "timeout",
-            )
-            self._fill_pytest_buckets(result, out)
-            return result
-
-        assert r is not None
-        raw_out, stderr = self._read_test_log_from_container(r.stdout or "", r.stderr or "")
-        exit_code = r.returncode
-        m = re.search(r"__EXIT__(\d+)", raw_out)
-        if m:
-            exit_code = int(m.group(1))
-
-        out = normalize_terminal_text(raw_out)
+        # Stream into a host-owned file. Candidate processes cannot replace a
+        # workspace log or redirect it through a symlink before collection.
+        stderr = ""
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as log:
+            try:
+                r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True,
+                                   timeout=timeout_sec, env=docker_env())
+                exit_code = r.returncode
+            except subprocess.TimeoutExpired:
+                exit_code = 124
+                stderr = "loopsbench: subprocess timeout"
+            log.seek(0)
+            out = normalize_terminal_text(log.read())
+        # Only the actual docker-exec status may supply the parser's exit marker.
+        out = "\n".join(line for line in out.splitlines() if not re.fullmatch(r"__EXIT__-?\d+\s*", line.strip()))
+        out = out.rstrip() + f"\n__EXIT__{exit_code}\n"
 
         result = TestRunResult(
             exit_code=exit_code,
@@ -215,9 +154,16 @@ class TestRunner:
             seen.add(key)
             pairs.append((nodeid, status))
 
-        cohort = frozenset(n for n, _ in pairs)
+        statuses: dict[str, set[str]] = {}
+        for nodeid, status in pairs:
+            statuses.setdefault(nodeid, set()).add(status)
+        cohort = frozenset(statuses)
+        conflicting = {nodeid for nodeid, values in statuses.items() if len(values) > 1}
         for nodeid, status in pairs:
             if should_skip_nested_pytest_nodeid(nodeid, cohort):
                 continue
+            if nodeid in conflicting:
+                if nodeid not in result.errors:
+                    result.errors.append(nodeid)
+                continue
             buckets[status].append(nodeid)
-

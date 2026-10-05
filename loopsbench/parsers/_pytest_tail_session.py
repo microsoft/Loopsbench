@@ -18,7 +18,7 @@ from loopsbench.parsers.base_parser import UnitTestStatus
 
 _TAIL_CASE_ID = "__loopsbench_pytest_session_tail__"
 
-_EXIT_RE = re.compile(r"^__EXIT__(\d+)\s*$")
+_EXIT_RE = re.compile(r"^__EXIT__(-?\d+)\s*$")
 _BANNER_RE = re.compile(r"^=+\s*(.+?)\s*=+\s*$")
 _COUNT_TOKEN = re.compile(
     r"(\d+)\s+(failed|passed|error|skipped|warnings?|deselected)",
@@ -31,16 +31,20 @@ def tail_case_id() -> str:
 
 
 def extract_pytest_tail_session(output: str) -> dict[str, UnitTestStatus] | None:
-    """If the log ends with pytest's final banner and ``__EXIT__``, return one case."""
+    """Reject a failed host exit even if the runner never printed a banner."""
     lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-    if len(lines) < 2:
+    if not lines:
         return None
     exit_line = lines[-1]
-    banner_line = lines[-2]
     m_exit = _EXIT_RE.match(exit_line)
     if not m_exit:
         return None
     exit_code = int(m_exit.group(1))
+    if exit_code != 0:
+        return {_TAIL_CASE_ID: UnitTestStatus.FAILED}
+    if len(lines) < 2:
+        return None
+    banner_line = lines[-2]
     m_banner = _BANNER_RE.match(banner_line)
     if not m_banner:
         return None
