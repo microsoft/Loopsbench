@@ -63,10 +63,12 @@ class TmuxSession:
 
     # -- public API --
 
-    def agent_network_phase(self):
+    def agent_network_phase(self, *, model_hosts=None, uses_host_gateway=False):
         if self._network_controller is None:
             return nullcontext()
-        return self._network_controller.agent_network_phase()
+        return self._network_controller.agent_network_phase(
+            model_hosts=model_hosts, uses_host_gateway=uses_host_gateway,
+        )
 
     def _append_command_log(self, keys: str) -> None:
         if self._commands_path is None:

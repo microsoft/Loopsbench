@@ -290,7 +290,8 @@ This project is licensed under the [MIT License](LICENSE). Third-party agent int
 
 
 Network access is controlled by phase: public preparation, an agent endpoint
-allowlist, and an offline tester. Add model endpoints with `--allow-agent-host`
+allowlist, and an offline tester. Hosts from runner-supplied model URLs are
+allowed automatically. Add other required hosts with `--allow-agent-host`
 or the run YAML `network` settings. All agent types and custom imports remain
 supported; old task directories need no network assets. These controls apply to
 task containers; host tools and provider-hosted search need agent-side controls.

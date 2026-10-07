@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from loopsbench.terminal.network_policy import configured_model_hosts
 from loopsbench.terminal.tmux_session import TmuxSession
 
 
@@ -35,6 +36,7 @@ class BaseAgent(ABC):
     def __init__(self, **kwargs):
         super().__init__()
         self._version = kwargs.get("version", None)
+        self._model_network_hosts = configured_model_hosts(kwargs)
 
     @staticmethod
     @abstractmethod
@@ -73,6 +75,19 @@ class BaseAgent(ABC):
         Existing custom agents need no new method. Agents that download tools
         should move those operations here; perform_task runs under agent policy.
         """
+
+    def model_network_hosts(self) -> list[str]:
+        """Trusted plugin hook for model endpoints with nonstandard config keys.
+
+        Return hostnames/IPs from runner configuration, never candidate files.
+        Conventional model URL kwargs and environment variables are automatic.
+        """
+        return list(getattr(self, "_model_network_hosts", []))
+
+    @property
+    def model_uses_host_gateway(self) -> bool:
+        """Whether this adapter routes model inference through Docker's gateway."""
+        return False
 
     def get_trajectory_paths(self) -> list[str]:
         """Return container paths to trajectory/log files that should be

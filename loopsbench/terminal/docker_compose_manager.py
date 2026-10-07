@@ -444,10 +444,13 @@ class DockerComposeManager:
         # Compose config already escapes literal dollars for a round trip.
         path.write_text(json.dumps(document))
         self._compose_files = [path]
-        if self._logs_path is not None:
+        self._record_network_policy(self._network.agent_policy())
+
+    def _record_network_policy(self, agent_policy: NetworkPolicy) -> None:
+        if self._logs_path is not None and self._network is not None:
             self._logs_path.mkdir(parents=True, exist_ok=True)
             record = self._network.model_dump()
-            record["agent"] = self._network.agent_policy().model_dump()
+            record["agent"] = agent_policy.model_dump()
             record["scope"] = "task Docker containers; host agent controllers are outside this boundary"
             (self._logs_path / "network-policy.json").write_text(json.dumps(record, indent=2))
 
@@ -458,12 +461,26 @@ class DockerComposeManager:
         self._run_compose(["exec", "-T", controller, *policy.command()])
 
     @contextmanager
-    def agent_network_phase(self):
+    def agent_network_phase(self, *, model_hosts: list[str] | None = None, uses_host_gateway: bool = False):
         if self._network is None:
             yield
             return
-        self.set_network_policy("client", self._network.agent_policy())
+        hosts = list(model_hosts or [])
+        if uses_host_gateway and self._network.agent.network_mode == "allowlist":
+            # These adapters rewrite their local proxy URL to the Docker gateway.
+            # Read the address from Docker, never from files/commands controlled
+            # by the candidate workspace. The sidecar owns the network namespace.
+            controller = self._network_controllers.get("client")
+            container = self._service_container(controller) if controller else self._client_container
+            networks = container.attrs.get("NetworkSettings", {}).get("Networks", {}) if container else {}
+            gateways = [network["Gateway"] for network in networks.values() if network.get("Gateway")]
+            if not gateways:
+                raise RuntimeError("Cannot resolve Docker gateway for the configured model proxy")
+            hosts.extend(gateways)
+        policy = self._network.agent_policy(hosts)
+        self.set_network_policy("client", policy)
         try:
+            self._record_network_policy(policy)
             yield
         finally:
             self.set_network_policy("client", self._network.environment)

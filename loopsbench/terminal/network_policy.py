@@ -6,11 +6,80 @@ import copy
 import ipaddress
 import os
 import re
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 NetworkMode = Literal["public", "no-network", "allowlist"]
+
+# Read only runner-provided inference settings. Repository URLs, download
+# mirrors, search/MCP servers and generic HTTP proxies are not model endpoints.
+MODEL_URL_ENV_KEYS = frozenset({
+    "OPENAI_BASE_URL", "OPENAI_API_BASE", "ANTHROPIC_BASE_URL",
+    "AZURE_API_BASE", "AZURE_OPENAI_ENDPOINT", "LLM_BASE_URL", "LLM_API_BASE",
+    "MSWEA_API_BASE", "MSWEA_BASE_URL", "PROXY_BASE", "COPILOT_SHIM_BASE_URL",
+    "GITHUB_COPILOT_API_BASE", "COPILOT_LOOPSBENCH_PROVIDER_BASE_URL",
+    "COPILOT_PROVIDER_BASE_URL", "DASHSCOPE_BASE_URL", "DASHSCOPE_OPENAI_BASE_URL",
+    "GEMINI_API_BASE", "GOOGLE_GEMINI_BASE_URL", "OLLAMA_HOST", "OLLAMA_API_BASE",
+    "OPENROUTER_API_BASE", "TOGETHERAI_API_BASE", "DEEPSEEK_API_BASE",
+})
+MODEL_URL_KWARG_KEYS = frozenset({
+    "url", "base_url", "api_base", "api_base_url", "api_url", "endpoint",
+    "azure_endpoint", "model_url", "model_base_url", "provider_base_url",
+    "llm_base_url", "openai_base_url", "anthropic_base_url",
+})
+MODEL_CONFIG_KEYS = frozenset({"model_kwargs", "llm_kwargs", "model_config", "llm_config", "llm"})
+
+
+def model_endpoint_hosts(urls: list[str]) -> list[str]:
+    """Extract exact hosts without persisting URL credentials, paths or keys."""
+    hosts = []
+    for url in urls:
+        if not url or not url.strip():
+            continue
+        try:
+            if any(ord(char) < 32 for char in url):
+                raise ValueError
+            parsed = urlsplit(url.strip())
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError
+            # Accessing port also validates malformed authorities.
+            _ = parsed.port
+            host = parsed.hostname.encode("idna").decode("ascii")
+            if "*" in host or "/" in host:
+                raise ValueError
+            hosts.extend(NetworkPolicy.validate_hosts([host]))
+        except (ValueError, UnicodeError):
+            # Never echo a credential-bearing URL in a validation error.
+            raise ValueError("Model endpoint must be an HTTP(S) URL with a valid hostname/IP and port") from None
+    return list(dict.fromkeys(hosts))
+
+
+def configured_model_hosts(
+    agent_kwargs: Mapping[str, Any] | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Discover model URLs in trusted run kwargs and model/runtime env files."""
+    environment = os.environ if environment is None else environment
+    urls = [environment[key] for key in sorted(MODEL_URL_ENV_KEYS) if environment.get(key)]
+
+    def collect(values: Mapping[str, Any]) -> None:
+        for key, value in values.items():
+            if key in MODEL_URL_KWARG_KEYS and isinstance(value, str):
+                urls.append(value)
+            elif key in MODEL_CONFIG_KEYS and isinstance(value, Mapping):
+                collect(value)
+            elif key == "env" and isinstance(value, Mapping):
+                urls.extend(value[name] for name in sorted(MODEL_URL_ENV_KEYS) if isinstance(value.get(name), str))
+            elif key in {"providers", "model_providers"} and isinstance(value, Mapping):
+                for provider in value.values():
+                    if isinstance(provider, Mapping):
+                        collect(provider)
+
+    collect(agent_kwargs or {})
+    return model_endpoint_hosts(urls)
 
 
 class NetworkPolicy(BaseModel):
@@ -63,16 +132,19 @@ class NetworkPlan(BaseModel):
     _validate_hosts = field_validator("extra_allowed_hosts")(NetworkPolicy.validate_hosts.__func__)
 
     @classmethod
-    def from_config(cls, value: NetworkPlan | dict | None) -> NetworkPlan:
+    def from_config(cls, value: NetworkPlan | dict | None, *, agent_kwargs: Mapping[str, Any] | None = None) -> NetworkPlan:
         plan = value if isinstance(value, cls) else cls.model_validate(value or {})
         extra = os.environ.get("LOOPSBENCH_ALLOWED_HOSTS", "")
-        hosts = NetworkPolicy.validate_hosts([*plan.extra_allowed_hosts, *filter(None, extra.split(","))])
+        hosts = NetworkPolicy.validate_hosts([
+            *plan.extra_allowed_hosts, *filter(None, extra.split(",")),
+            *configured_model_hosts(agent_kwargs),
+        ])
         return plan.model_copy(update={"extra_allowed_hosts": hosts})
 
-    def agent_policy(self) -> NetworkPolicy:
+    def agent_policy(self, model_hosts: list[str] | None = None) -> NetworkPolicy:
         if self.agent.network_mode != "allowlist":
             return self.agent
-        return NetworkPolicy(network_mode="allowlist", allowed_hosts=[*self.agent.allowed_hosts, *self.extra_allowed_hosts])
+        return NetworkPolicy(network_mode="allowlist", allowed_hosts=[*self.agent.allowed_hosts, *self.extra_allowed_hosts, *(model_hosts or [])])
 
 
 def controlled_compose(document: dict, plan: NetworkPlan, image: str) -> tuple[dict, dict[str, str]]:

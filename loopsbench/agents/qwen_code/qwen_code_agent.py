@@ -58,6 +58,7 @@ from pathlib import Path
 from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
 from loopsbench.harness.models import FailureMode
+from loopsbench.terminal.network_policy import model_endpoint_hosts
 from loopsbench.terminal.tmux_session import TmuxSession
 
 _TRAJECTORY_REL = Path("trajectories") / "qwen_code_stream.jsonl"
@@ -666,6 +667,9 @@ class QwenCodeAgent(BaseAgent):
     def get_trajectory_paths(self) -> list[str]:
         # Trajectory is written on the host under logging_dir; no container copy.
         return []
+
+    def model_network_hosts(self) -> list[str]:
+        return [*super().model_network_hosts(), *model_endpoint_hosts([_dashscope_base_url_from_env(os.environ)])]
 
     def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         if _workspace_mode() != "container":

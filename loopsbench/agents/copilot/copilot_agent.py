@@ -9,6 +9,7 @@ from pathlib import Path
 
 from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
+from loopsbench.terminal.network_policy import model_endpoint_hosts
 from loopsbench.terminal.tmux_session import TmuxSession
 
 _COPILOT_BIN_CONTAINER = "/usr/local/bin/copilot"
@@ -45,6 +46,9 @@ class CopilotAgent(BaseAgent):
 
     def get_trajectory_paths(self) -> list[str]:
         return [_TRAJECTORY_CONTAINER, _LAST_MESSAGE_CONTAINER]
+
+    def model_network_hosts(self) -> list[str]:
+        return [*super().model_network_hosts(), *model_endpoint_hosts([self._provider_base_url])]
 
     def _env_assignments(self) -> dict[str, str]:
         return {

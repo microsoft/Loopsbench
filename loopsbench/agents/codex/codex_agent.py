@@ -66,6 +66,10 @@ class CodexAgent(BaseAgent):
     def get_trajectory_paths(self) -> list[str]:
         return [_TRAJECTORY_CONTAINER, _LAST_MSG_CONTAINER, _CODEX_HOME_CONTAINER]
 
+    @property
+    def model_uses_host_gateway(self) -> bool:
+        return self._provider == "copilot"
+
     def _config_toml(self) -> str:
         """Build the codex config.toml content for the chosen provider."""
         if self._provider == "copilot":

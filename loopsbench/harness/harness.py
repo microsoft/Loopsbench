@@ -111,7 +111,7 @@ class Harness:
         global_test_timeout_sec: float | None = None,
         network: NetworkPlan | dict | None = None,
     ):
-        self._network = NetworkPlan.from_config(network)
+        self._network = NetworkPlan.from_config(network, agent_kwargs=agent_kwargs)
         self._start_time = datetime.now(timezone.utc).isoformat()
 
         self._dataset_path = dataset_path
@@ -1006,7 +1006,10 @@ PY
         instruction: str,
     ) -> AgentResult | None:
         agent.prepare(session=session, logging_dir=logging_dir)
-        with session.agent_network_phase():
+        with session.agent_network_phase(
+            model_hosts=agent.model_network_hosts(),
+            uses_host_gateway=agent.model_uses_host_gateway,
+        ):
             return agent.perform_task(
                 instruction=instruction,
                 session=session,
@@ -1032,7 +1035,10 @@ PY
 
         try:
             agent.prepare(session=session, logging_dir=logging_dir)
-            with session.agent_network_phase():
+            with session.agent_network_phase(
+                model_hosts=agent.model_network_hosts(),
+                uses_host_gateway=agent.model_uses_host_gateway,
+            ):
                 result = agent.perform_task(
                     instruction=instruction,
                     session=session,

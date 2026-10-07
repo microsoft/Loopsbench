@@ -80,6 +80,10 @@ class OpenHandsAgent(BaseAgent):
         )
 
     @property
+    def model_uses_host_gateway(self) -> bool:
+        return self._provider == "copilot"
+
+    @property
     def _env_exports(self) -> list[str]:
         """Return shell export commands to set required env vars.
 
