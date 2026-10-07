@@ -5,9 +5,10 @@ Test strategy:
   1. Compilation test - builds the C project successfully
   2. Unit tests - run a C program that tests packet functions and socket init
   3. Integration test - verifies connection establishment using two processes
-     with LD_PRELOAD hostname mocks and IP aliases on loopback
+     with LD_PRELOAD hostname mocks and distinct loopback addresses
 """
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -39,13 +40,11 @@ def build_main():
     )
 
 
-def ensure_ip_aliases():
-    """Add 172.17.0.2 and 172.17.0.3 to the loopback interface."""
-    for ip in ("172.17.0.2/24", "172.17.0.3/24"):
-        subprocess.run(
-            f"ip addr add {ip} dev lo",
-            shell=True, capture_output=True
-        )  # ignore errors if already added
+def check_loopback_addresses():
+    """Check that both simulated endpoints can bind without changing interfaces."""
+    for ip in ("127.0.0.2", "127.0.0.3"):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as endpoint:
+            endpoint.bind((ip, 0))
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +122,7 @@ int main(void){
     if(!s){puts("FAIL tju_socket"); return 1;}
     if(s->state != 0){printf("FAIL initial state %d\n",s->state); return 1;}
     puts("PASS initial_state_CLOSED");
-    tju_sock_addr a; a.ip=inet_network("172.17.0.3"); a.port=1234;
+    tju_sock_addr a; a.ip=inet_network(SERVER_IP); a.port=1234;
     if(tju_bind(s,a)!=0){puts("FAIL tju_bind"); return 1;}
     if(s->bind_addr.port!=1234){puts("FAIL bind_addr.port"); return 1;}
     puts("PASS tju_bind_addr_stored");
@@ -292,14 +291,14 @@ def test_connection_establishment():
     Verifies that tju_connect and tju_accept complete the three-way handshake.
 
     Approach:
-    - Add loopback IP aliases for CLIENT_IP and SERVER_IP
+    - Check that the loopback addresses for CLIENT_IP and SERVER_IP are usable
     - Run server binary with LD_PRELOAD=mock_server.so (hostname="server",
       binds to SERVER_IP:20218)
     - Run client binary with LD_PRELOAD=mock_client.so (hostname="client",
       binds to CLIENT_IP:20218)
     - Both should exit 0 after the handshake completes
     """
-    ensure_ip_aliases()
+    check_loopback_addresses()
     _build_integration_prereqs()
 
     srv_env = os.environ.copy()

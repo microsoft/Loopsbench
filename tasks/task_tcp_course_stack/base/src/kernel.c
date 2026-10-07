@@ -1,60 +1,60 @@
 #include "kernel.h"
 /*
-模拟Linux内核收到一份TCP报文的处理函数
+Handler that simulates the Linux kernel receiving a TCP packet
 */
 void onTCPPocket(char* pkt){
-    // 当我们收到TCP包时 包中 源IP 源端口 是发送方的 也就是我们眼里的 远程(remote) IP和端口
+    // When we receive a TCP packet, the source IP and source port in the packet belong to the sender, which are the remote IP and port from our perspective
     uint16_t remote_port = get_src(pkt);
     uint16_t local_port = get_dst(pkt);
-    // remote ip 和 local ip 是读IP 数据包得到的 仿真的话这里直接根据hostname判断
+    // The remote IP and local IP would be read from the IP packet; in the simulation, determine them directly from the hostname
 
     char hostname[8];
     gethostname(hostname, 8);
     uint32_t remote_ip, local_ip;
-    if(strcmp(hostname,"server")==0){ // 自己是服务端 远端就是客户端
+    if(strcmp(hostname,"server")==0){ // This host is the server, so the remote endpoint is the client
         local_ip = inet_network(SERVER_IP);
         remote_ip = inet_network(CLIENT_IP);
-    }else if(strcmp(hostname,"client")==0){ // 自己是客户端 远端就是服务端 
+    }else if(strcmp(hostname,"client")==0){ // This host is the client, so the remote endpoint is the server
         local_ip = inet_network(CLIENT_IP);
         remote_ip = inet_network(SERVER_IP);
     }
 
     int hashval;
-    // 根据4个ip port 组成四元组 查找有没有已经建立连接的socket
+    // Use the four-tuple formed by the two IPs and ports to find an established socket
     hashval = cal_hash(local_ip, local_port, remote_ip, remote_port);
 
-    // 首先查找已经建立连接的socket哈希表
+    // First search the established-socket hash table
     if (established_socks[hashval]!=NULL){
         tju_handle_packet(established_socks[hashval], pkt);
         return;
     }
 
-    // 没有的话再查找监听中的socket哈希表
-    hashval = cal_hash(local_ip, local_port, 0, 0); //监听的socket只有本地监听ip和端口 没有远端
+    // If none is found, search the listening-socket hash table
+    hashval = cal_hash(local_ip, local_port, 0, 0); //A listening socket only has a local listening IP and port, with no remote endpoint
     if (listen_socks[hashval]!=NULL){
         tju_handle_packet(listen_socks[hashval], pkt);
         return;
     }
 
-    // 都没找到 丢掉数据包
-    printf("找不到能够处理该TCP数据包的socket, 丢弃该数据包\n");
+    // If neither lookup succeeds, drop the packet
+    printf("No socket can handle this TCP packet; dropping the packet\n");
     return;
 }
 
 
 
 /*
-以用户填写的TCP报文为参数
-根据用户填写的TCP的目的IP和目的端口,向该地址发送数据报
-不可以修改此函数实现
+Takes the user-filled TCP packet as an argument
+Sends the datagram to the TCP destination IP and destination port provided by the user
+Do not modify this function implementation
 */
 void sendToLayer3(char* packet_buf, int packet_len){
     if (packet_len>MAX_LEN){
-        printf("ERROR: 不能发送超过 MAX_LEN 长度的packet, 防止IP层进行分片\n");
+        printf("ERROR: cannot send packets longer than MAX_LEN, to prevent IP-layer fragmentation\n");
         return;
     }
 
-    // 获取hostname 根据hostname 判断是客户端还是服务端
+    // Get the hostname and use it to determine whether this host is the client or the server
     char hostname[8];
     gethostname(hostname, 8);
 
@@ -69,16 +69,16 @@ void sendToLayer3(char* packet_buf, int packet_len){
         conn.sin_addr.s_addr = inet_addr(SERVER_IP);
         rst = sendto(BACKEND_UDPSOCKET_ID, packet_buf, packet_len, 0, (struct sockaddr*)&conn, sizeof(conn));
     }else{
-        printf("请不要改动hostname...\n");
+        printf("Please do not change the hostname...\n");
         exit(-1);
     }
 }
 
 /*
- 仿真接受数据线程
- 不断调用server或cliet监听在20218端口的UDPsocket的recvfrom
- 一旦收到了大于TCPheader长度的数据 
- 则接受整个TCP包并调用onTCPPocket()
+ Simulated data receive thread
+ Continuously calls recvfrom on the UDP socket where the server or client listens on port 20218
+ Once data larger than the TCP header length is received
+ receive the entire TCP packet and call onTCPPocket()
 */
 void* receive_thread(void* arg){
 
@@ -92,18 +92,18 @@ void* receive_thread(void* arg){
     int from_addr_size = sizeof(from_addr);
 
     while(1) {
-        // MSG_PEEK 表示看一眼 不会把数据从缓冲区删除
+        // MSG_PEEK means inspect without removing data from the buffer
         len = recvfrom(BACKEND_UDPSOCKET_ID, hdr, DEFAULT_HEADER_LEN, MSG_PEEK, (struct sockaddr *)&from_addr, &from_addr_size);
-        // 一旦收到了大于header长度的数据 则接受整个TCP包
+        // Once data larger than the header length is received, receive the entire TCP packet
         if(len >= DEFAULT_HEADER_LEN){
             plen = get_plen(hdr); 
             pkt = malloc(plen);
             buf_size = 0;
-            while(buf_size < plen){ // 直到接收到 plen 长度的数据 接受的数据全部存在pkt中
+            while(buf_size < plen){ // Continue until plen bytes have been received; all received data is stored in pkt
                 n = recvfrom(BACKEND_UDPSOCKET_ID, pkt + buf_size, plen - buf_size, NO_FLAG, (struct sockaddr *)&from_addr, &from_addr_size);
                 buf_size = buf_size + n;
             }
-            // 通知内核收到一个完整的TCP报文
+            // Notify the kernel that a complete TCP packet was received
             onTCPPocket(pkt);
             free(pkt);
         }
@@ -111,21 +111,21 @@ void* receive_thread(void* arg){
 }
 
 /*
- 开启仿真, 运行起后台线程
+ Start the simulation and launch the background thread
 
- 不论是server还是client
- 都创建一个UDP socket 监听在20218端口
- 然后创建新线程 不断调用该socket的recvfrom
+ Whether this host is the server or the client
+ create a UDP socket listening on port 20218
+ then create a new thread that continuously calls recvfrom on that socket
 */
 void startSimulation(){
-    // 对于内核 初始化监听socket哈希表和建立连接socket哈希表
+    // Initialize the listening-socket and established-socket hash tables for the kernel
     int index;
     for(index=0;index<MAX_SOCK;index++){
         listen_socks[index] = NULL;
         established_socks[index] = NULL;
     }
 
-    // 获取hostname 
+    // Get the hostname
     char hostname[8];
     gethostname(hostname, 8);
     // printf("startSimulation on hostname: %s\n", hostname);
@@ -136,8 +136,8 @@ void startSimulation(){
         exit(-1);
     }
 
-    // 设置socket选项 SO_REUSEADDR = 1 
-    // 意思是 允许绑定本地地址冲突 和 改变了系统对处于TIME_WAIT状态的socket的看待方式 
+    // Set socket option SO_REUSEADDR = 1
+    // This allows local address binding conflicts and changes how the system treats sockets in TIME_WAIT state
     int optval = 1;
     setsockopt(BACKEND_UDPSOCKET_ID, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(int));
 
@@ -163,6 +163,6 @@ void startSimulation(){
 }
 
 int cal_hash(uint32_t local_ip, uint16_t local_port, uint32_t remote_ip, uint16_t remote_port){
-    // 实际上肯定不是这么算的
+    // The real implementation certainly would not calculate it this way
     return ((int)local_ip+(int)local_port+(int)remote_ip+(int)remote_port)%MAX_SOCK;
 }

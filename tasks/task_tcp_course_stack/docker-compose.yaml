@@ -4,8 +4,6 @@ services:
       dockerfile: Dockerfile
     image: ${LOOPSBENCH_TASK_DOCKER_CLIENT_IMAGE_NAME}
     container_name: ${LOOPSBENCH_TASK_DOCKER_CLIENT_CONTAINER_NAME}
-    cap_add:
-    - NET_ADMIN
     command:
     - sh
     - -c
@@ -19,8 +17,6 @@ services:
   tester:
     image: ${LOOPSBENCH_TASK_DOCKER_CLIENT_IMAGE_NAME}
     container_name: ${LOOPSBENCH_TASK_DOCKER_TESTER_CONTAINER_NAME}
-    cap_add:
-    - NET_ADMIN
     command:
     - sh
     - -c

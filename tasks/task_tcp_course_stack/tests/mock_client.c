@@ -1,7 +1,7 @@
 /*
  * LD_PRELOAD mock for client process.
  * Overrides gethostname() to return "client".
- * Overrides startSimulation() to bind to CLIENT_IP (172.17.0.2)
+ * Overrides startSimulation() to bind to CLIENT_IP (127.0.0.2)
  * so server and client can run concurrently in the same container.
  */
 #define _GNU_SOURCE
@@ -14,7 +14,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 
-#define CLIENT_IP_STR "172.17.0.2"
+#define CLIENT_IP_STR "127.0.0.2"
 #define BACKEND_PORT  20218
 
 extern int BACKEND_UDPSOCKET_ID;

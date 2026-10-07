@@ -2,9 +2,9 @@
 #include <sys/time.h>
 sendTimer* timerQueue = NULL;
 /*
-创建 TCP socket
-初始化对应的结构体
-设置初始状态为 CLOSED
+Create a TCP socket
+Initialize the corresponding structure
+Set the initial state to CLOSED
 */
 tju_tcp_t* tju_socket()
 {
@@ -13,7 +13,7 @@ tju_tcp_t* tju_socket()
 }
 
 /*
-绑定监听的地址 包括ip和端口
+Bind the listening address, including IP and port
 */
 int tju_bind(tju_tcp_t* sock, tju_sock_addr bind_addr)
 {
@@ -22,26 +22,26 @@ int tju_bind(tju_tcp_t* sock, tju_sock_addr bind_addr)
 }
 
 /*
-被动打开 监听bind的地址和端口
-设置socket的状态为LISTEN
-注册该socket到内核的监听socket哈希表
+Perform a passive open and listen on the address and port from bind
+Set the socket state to LISTEN
+Register this socket in the kernel listening-socket hash table
 */
 int tju_listen(tju_tcp_t* sock)
 {
     sock->state = LISTEN;
     int hashval = cal_hash(sock->bind_addr.ip, sock->bind_addr.port, 0, 0);
     listen_socks[hashval] = sock;
-    // 建立半连接和全连接队列
+    // Create half-open and fully-established connection queues
     syn_queues[hashval] = malloc(sizeof(syn_queue_member*) * MAX_SYN_QUEUE_LENGTH);
     accept_queues[hashval] = malloc(sizeof(tju_tcp_t*) * MAX_ACCEPT_QUEUE_LENGTH);
     return 0;
 }
 
 /*
-接受连接
-返回与客户端通信用的socket
-这里返回的socket一定是已经完成3次握手建立了连接的socket
-因为只要该函数返回, 用户就可以马上使用该socket进行send和recv
+Accept a connection
+Return the socket used to communicate with the client
+The socket returned here must have completed the three-way handshake and established a connection
+because as soon as this function returns, the user can immediately use the socket for send and recv
 */
 tju_tcp_t* tju_accept(tju_tcp_t* listen_sock)
 {
@@ -50,11 +50,11 @@ tju_tcp_t* tju_accept(tju_tcp_t* listen_sock)
 }
 
 /*
-连接到服务端
-该函数以一个socket为参数
-调用函数前, 该socket还未建立连接
-函数正常返回后, 该socket一定是已经完成了3次握手, 建立了连接
-因为只要该函数返回, 用户就可以马上使用该socket进行send和recv
+Connect to the server
+This function takes a socket as its argument
+Before the function is called, this socket has not established a connection
+After the function returns normally, this socket must have completed the three-way handshake and established a connection
+because as soon as this function returns, the user can immediately use the socket for send and recv
 */
 int tju_connect(tju_tcp_t* sock, tju_sock_addr target_addr)
 {
@@ -68,13 +68,13 @@ void* send_thread(void* args)
     return NULL;
 }
 
-// 将新的计时器加入计时器队列
+// Append a new timer to the timer queue
 void timerAppend(sendTimer* T)
 {
     /* TODO: implement */
 }
 
-// 删除首计时器节点
+// Delete the first timer node
 void timerDel()
 {
     /* TODO: implement */
@@ -94,7 +94,7 @@ int tju_recv(tju_tcp_t* sock, void* buffer, int len)
 
 uint16_t count_rwnd(tju_tcp_t* sock)
 {
-    return TCP_RECVWN_SIZE - sock->received_len; // 虽然received_len 是int,但大小肯定在uint16的范围内
+    return TCP_RECVWN_SIZE - sock->received_len; // Although received_len is an int, its value must be within the uint16 range
 }
 
 int tju_handle_packet(tju_tcp_t* sock, char* pkt)
@@ -114,15 +114,15 @@ double timeval_diff(struct timeval* tv0, struct timeval* tv1)
     return 0;
 }
 
-// 最初对计时器的设想，后来采用了计时器队列用于rdt，这部分计时器的设计便只用于实验的第一阶段了
-// 该计时器递归调用重传
+// This was the initial timer design; later a timer queue was used for RDT, so this timer design is only used in the first stage of the experiment
+// This timer recursively triggers retransmission
 void* set_timer_with_retransmit_thread(void* args)
 {
     /* TODO: implement */
     return NULL;
 }
 
-// 面对丢包时有处理，但不适应于滑动窗口的数据传输，滑动窗口的数据传输依靠sender_window的变量来协调
+// This handles packet loss, but does not fit sliding-window data transfer; sliding-window data transfer is coordinated by sender_window variables
 void packet_buf_send_with_timer(char* packet_buf, int packet_len, double timeoutInterval)
 {
     /* TODO: implement */
@@ -258,16 +258,16 @@ void write_log_RTTS(float SampleRTT, float EstimatedRTT, float DeviationRTT, flo
     }
 }
 
-// 因为发送窗口和接受窗口都是一个循环数组的思想，指针在尽头需要回到缓冲区开头
-// 循环数组中两个指针之间的距离，其中lower是要实际小于higher的
+// Because the send and receive windows both use circular-array logic, pointers must wrap back to the start of the buffer at the end
+// Distance between two pointers in the circular array, where lower should actually be less than higher
 int distance_in_sender_window(char* lower, char* higher)
 {
     /* TODO: implement */
     return 0;
 }
 
-// 因为发送窗口和接受窗口都是一个循环数组的思想，指针在尽头需要回到缓冲区开头
-// 返回的是pos指针增加了num后的结果指针的位置
+// Because the send and receive windows both use circular-array logic, pointers must wrap back to the start of the buffer at the end
+// Returns the resulting pointer position after advancing pos by num
 char* add_in_sender_window(tju_tcp_t* sock, char* pos, int num)
 {
     /* TODO: implement */

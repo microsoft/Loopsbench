@@ -5,7 +5,7 @@ Test strategy:
   1. Compilation test - builds the C project successfully
   2. Unit tests - run a C program that tests packet functions and socket init
   3. Integration test - verifies connection establishment using two processes
-     with LD_PRELOAD hostname mocks and IP aliases on loopback
+     with LD_PRELOAD hostname mocks and distinct loopback addresses
 """
 import os
 import subprocess
@@ -37,15 +37,6 @@ def build_main():
         "make all FLAGS='-pthread -g -DDEBUG -fcommon -I./inc'",
         cwd=WORKSPACE
     )
-
-
-def ensure_ip_aliases():
-    """Add 172.17.0.2 and 172.17.0.3 to the loopback interface."""
-    for ip in ("172.17.0.2/24", "172.17.0.3/24"):
-        subprocess.run(
-            f"ip addr add {ip} dev lo",
-            shell=True, capture_output=True
-        )  # ignore errors if already added
 
 
 # ---------------------------------------------------------------------------

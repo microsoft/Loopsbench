@@ -6,15 +6,15 @@
 #include "tju_packet.h"
 
 /*
-new added: 全连接队列和半连接队列
+new added: fully-established and half-open connection queues
 */
 typedef struct {
     tju_tcp_t* sock;
     uint32_t expect_ack;
 } syn_queue_member;
 
-syn_queue_member** syn_queues[32]; // 半连接
-tju_tcp_t** accept_queues[32];     // 全连接
+syn_queue_member** syn_queues[32]; // half-open connections
+tju_tcp_t** accept_queues[32];     // fully-established connections
 
 FILE* server_event_log;
 FILE* client_event_log;
@@ -28,20 +28,20 @@ typedef struct {
     double timeout;
 } timer_args;
 
-int receive_flag; // 为1表示收到ACK了，这里觉得应该搞一个数组，每个socket对应一个，这里为了简便
+int receive_flag; // A value of 1 means an ACK was received; this should probably be an array with one entry per socket, but this is simpler
 int tmp_ack;
 int last_fast_retransmit_seq;
 
 typedef struct {
-    uint32_t ack; // 记录所发送pkt的Ack字段值
-    uint32_t seq; // 记录所发送pkt的Seq字段值
+    uint32_t ack; // record the Ack field value of the sent pkt
+    uint32_t seq; // record the Seq field value of the sent pkt
     char* firstByte;
     int len;
-    int is_retransmit; // 记录下这个timer所对应的pkt是否被重传过，仅仅只有接收端哦未被重传过的数据包时才会用于更新timeout_interval
-    uint8_t flags;     // 标志位
+    int is_retransmit; // record whether the pkt associated with this timer has been retransmitted; timeout_interval is updated only when an unretransmitted packet is acknowledged
+    uint8_t flags;     // flags
 
     struct timeval sendTime;
-    struct timeval updateTime; // 当计时器队列队首的计时器取消后，计时器应当重置 // 仅用于send_thread的超时判断
+    struct timeval updateTime; // when the timer at the head of the timer queue is canceled, the timer should be reset // only used for timeout checks in send_thread
     struct timeval RTO;
     struct sendTimer* next;
 } sendTimer;
@@ -71,37 +71,37 @@ void write_log_SWND(int size);
 char* add_in_sender_window(tju_tcp_t* sock, char* pos, int num);
 int distance_in_sender_window(char* lower, char* higher);
 /*
-创建 TCP socket
-初始化对应的结构体
-设置初始状态为 CLOSED
+Create a TCP socket
+Initialize the corresponding structure
+Set the initial state to CLOSED
 */
 tju_tcp_t* tju_socket();
 
 /*
-绑定监听的地址 包括ip和端口
+Bind the listening address, including IP and port
 */
 int tju_bind(tju_tcp_t* sock, tju_sock_addr bind_addr);
 
 /*
-被动打开 监听bind的地址和端口
-设置socket的状态为LISTEN
+Perform a passive open and listen on the address and port from bind
+Set the socket state to LISTEN
 */
 int tju_listen(tju_tcp_t* sock);
 
 /*
-接受连接
-返回与客户端通信用的socket
-这里返回的socket一定是已经完成3次握手建立了连接的socket
-因为只要该函数返回, 用户就可以马上使用该socket进行send和recv
+Accept a connection
+Return the socket used to communicate with the client
+The socket returned here must have completed the three-way handshake and established a connection
+because as soon as this function returns, the user can immediately use the socket for send and recv
 */
 tju_tcp_t* tju_accept(tju_tcp_t* sock);
 
 /*
-连接到服务端
-该函数以一个socket为参数
-调用函数前, 该socket还未建立连接
-函数正常返回后, 该socket一定是已经完成了3次握手, 建立了连接
-因为只要该函数返回, 用户就可以马上使用该socket进行send和recv
+Connect to the server
+This function takes a socket as its argument
+Before the function is called, this socket has not established a connection
+After the function returns normally, this socket must have completed the three-way handshake and established a connection
+because as soon as this function returns, the user can immediately use the socket for send and recv
 */
 int tju_connect(tju_tcp_t* sock, tju_sock_addr target_addr);
 
@@ -109,8 +109,8 @@ int tju_send(tju_tcp_t* sock, const void* buffer, int len);
 int tju_recv(tju_tcp_t* sock, void* buffer, int len);
 
 /*
-关闭一个TCP连接
-这里涉及到四次挥手
+Close a TCP connection
+This involves the four-way FIN teardown
 */
 int tju_close(tju_tcp_t* sock);
 

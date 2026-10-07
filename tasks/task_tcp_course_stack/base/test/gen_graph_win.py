@@ -21,7 +21,7 @@ def plot_win(time_list, win_list, win_type, type=[]):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig('/vagrant/tju_tcp/test/%sWindowSize_VS_Time.png'%win_type, dpi=600)
-    print("绘制成功, 图像位于/vagrant/tju_tcp/test/%sWindowSize_VS_Time.png"%win_type)
+    print("Plot created successfully; image is at /vagrant/tju_tcp/test/%sWindowSize_VS_Time.png"%win_type)
     plt.cla()
 
 def plot_all(cwnd_list, rwnd_list, swnd_list):
@@ -34,7 +34,7 @@ def plot_all(cwnd_list, rwnd_list, swnd_list):
     plt.ylabel('Window Size (segment)', fontdict={'size':font_size})
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig('/vagrant/tju_tcp/test/AllWindowSize_VS_Time.png', dpi=600)
-    print("绘制成功, 图像位于/vagrant/tju_tcp/test/AllWindowSize_VS_Time.png")
+    print("Plot created successfully; image is at /vagrant/tju_tcp/test/AllWindowSize_VS_Time.png")
     plt.cla()
 
 def plot_rtt(time_list, SampleRTT, EstimatedRTT, DeviationRTT, TimeoutInterval):
@@ -47,7 +47,7 @@ def plot_rtt(time_list, SampleRTT, EstimatedRTT, DeviationRTT, TimeoutInterval):
     plt.ylabel('Time (ms)', fontdict={'size':font_size})
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig('/vagrant/tju_tcp/test/RTT.png', dpi=600)
-    print("绘制成功, 图像位于/vagrant/tju_tcp/test/RTT_VS_Time.png")
+    print("Plot created successfully; image is at /vagrant/tju_tcp/test/RTT_VS_Time.png")
     plt.cla()
 
 def plot_throughput(time_list, throuput_list, thrp_intv):
@@ -57,7 +57,7 @@ def plot_throughput(time_list, throuput_list, thrp_intv):
     plt.ylim(ymin=0, ymax=max(throuput_list)*1.05)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig('/vagrant/tju_tcp/test/Throuput.png', dpi=600)
-    print("绘制成功, 图像位于/vagrant/tju_tcp/test/Throuput.png [注: 每%.3fs计算一次瞬时吞吐率]"%thrp_intv)
+    print("Plot created successfully; image is at /vagrant/tju_tcp/test/Throuput.png [note: every %.3fscalculate instantaneous throughput once]"%thrp_intv)
     plt.cla()
 
 def read_trace(file):
@@ -72,9 +72,9 @@ def read_trace(file):
     start_time = 0
     with open(file, 'r', encoding='utf-8') as f:
         for num, line in enumerate(f):
-            if(line=='\n'): continue # 跳过空行
+            if(line=='\n'): continue # skip blank lines
             if('SEND' not in line and 'RECV' not in line and 'CWND' not in line and 'RWND' not in line 
-            and 'SWND' not in line and 'RTTS' not in line and 'DELV' not in line): continue # 跳过非事件行
+            and 'SWND' not in line and 'RTTS' not in line and 'DELV' not in line): continue # skip non-event lines
             line = line.strip('\n')
             line = line.replace('[', '')
             line = line.replace(']', '')
@@ -126,7 +126,7 @@ def read_trace(file):
     SWND_dic['time'] = [item - start_time for item in SWND_dic['utctime']]
     RTTS_dic['time'] = [item - start_time for item in RTTS_dic['utctime']]
     DELV_dic['time'] = [item - start_time for item in DELV_dic['utctime']]
-    SEND_dic['time'] = np.divide(SEND_dic['time'], 1000000) # 单位: s
+    SEND_dic['time'] = np.divide(SEND_dic['time'], 1000000) # unit: s
     RECV_dic['time'] = np.divide(RECV_dic['time'], 1000000)
     CWND_dic['time'] = np.divide(CWND_dic['time'], 1000000)
     RWND_dic['time'] = np.divide(RWND_dic['time'], 1000000)
@@ -140,16 +140,16 @@ def read_trace(file):
 FILE_TO_READ = '/vagrant/tju_tcp/test/client.event.trace'
 if len(sys.argv)>=2:
 	FILE_TO_READ = sys.argv[1]
-print("正在使用 %s Trace文件绘图"%FILE_TO_READ)
+print("Using %s trace file to draw graphs"%FILE_TO_READ)
 SEND_dic, RECV_dic, CWND_dic, RWND_dic, SWND_dic, RTTS_dic, DELV_dic = read_trace(FILE_TO_READ)
 
-# 绘图时是否需要间隔 间隔的大小 绘制的数据区间 需要大家根据自己的数据以及绘图效果自行调整, 可参考
+# Whether plotting needs an interval, the interval size, and the plotted data range should be adjusted based on your own data and plotting results; for reference
 intv = 100
 if len(CWND_dic['utctime']):
-    plot_win(CWND_dic['time'], np.array(CWND_dic['size']), 'Congestion', CWND_dic['type']) # 用全部数据绘图
-    # plot_win(CWND_dic['time'][::intv], np.array(CWND_dic['size'][::intv]), 'Congestion', CWND_dic['type'][::intv]) # 间隔100个数据进行绘制
-    # plot_win(CWND_dic['time'][:100], np.array(CWND_dic['size'][:100]), 'Congestion', CWND_dic['type'][:100]) # 仅绘制前100个数据点
-    # plot_win(CWND_dic['time'][100:201], np.array(CWND_dic['size'][100:201]), 'Congestion', CWND_dic['type'][100:201]) # 仅绘制第100到第200的数据点
+    plot_win(CWND_dic['time'], np.array(CWND_dic['size']), 'Congestion', CWND_dic['type']) # plot with all data
+    # plot_win(CWND_dic['time'][::intv], np.array(CWND_dic['size'][::intv]), 'Congestion', CWND_dic['type'][::intv]) # plot every 100th data point
+    # plot_win(CWND_dic['time'][:100], np.array(CWND_dic['size'][:100]), 'Congestion', CWND_dic['type'][:100]) # plot only the first 100 data points
+    # plot_win(CWND_dic['time'][100:201], np.array(CWND_dic['size'][100:201]), 'Congestion', CWND_dic['type'][100:201]) # plot only data points 100 through 200
 
 if len(RWND_dic['utctime']):
     plot_win(RWND_dic['time'][::intv], RWND_dic['size'][::intv], 'Receive')
@@ -162,7 +162,7 @@ plot_all([CWND_dic['time'][::intv], CWND_dic['size'][::intv]], [RWND_dic['time']
 if len(RTTS_dic['utctime']): 
     plot_rtt(RTTS_dic['time'][::intv], RTTS_dic['SampleRTT'][::intv], RTTS_dic['EstimatedRTT'][::intv], RTTS_dic['DeviationRTT'][::intv], RTTS_dic['TimeoutInterval'][::intv])
 
-# 每间隔1s绘制一次吞吐率
+# Plot throughput at 1s intervals
 if len(DELV_dic['utctime']): 
     thrp_intv = 1 # throughput interval
     time_start = DELV_dic['time'][0]
@@ -172,7 +172,7 @@ if len(DELV_dic['utctime']):
         time_end = time_start+thrp_intv
         mark = (DELV_dic['time']>=time_start) & (DELV_dic['time']<time_end)
         payloads_size = np.array(DELV_dic['size'])[mark]
-        DELV_dic['throughput'].append(np.sum(payloads_size)*8/thrp_intv) # 单位: bps
+        DELV_dic['throughput'].append(np.sum(payloads_size)*8/thrp_intv) # unit: bps
         time_start += thrp_intv
     plot_throughput(range(intvs), DELV_dic['throughput'], thrp_intv)
  

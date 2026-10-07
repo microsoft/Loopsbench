@@ -11,7 +11,7 @@ TEST_USER = 'vagrant'
 TEST_PASS = 'vagrant'
 EXITING = False
 
-# 输入 带宽 延迟 丢包率
+# Input bandwidth, delay, and packet loss rate
 rate = 100 
 delay = 300
 delay_distro = 50
@@ -21,222 +21,222 @@ if len(sys.argv)>=2:
     delay = int(sys.argv[2])
     delay_distro = int(sys.argv[3])
     loss = int(sys.argv[4])
-print("\n即将使用如下网络状态进行数据传输: rate:%dMbps delay:%dms delay-distro:%d loss:%d%% \n"%(rate, delay, delay_distro, loss)) 
+print("\nAbout to use the following network state for data transfer: rate:%dMbps delay:%dms delay-distro:%d loss:%d%% \n"%(rate, delay, delay_distro, loss))
 
 def my_exit(signum, frame):
     global EXITING
     if EXITING==True:
-        print('\n正在退出测试程序, 请稍等, 不需要多次停止\n')
+        print('\nExiting the test program, please wait; no need to stop it multiple times\n')
         return
         
     EXITING = True
-    print('\n正在退出测试程序, 请稍等\n')
+    print('\nExiting the test program, please wait\n')
     with Connection(host="172.17.0.3", user=TEST_USER, connect_kwargs={'password':TEST_PASS}) as conn:
-        print("[退出测试] 结束抓包进程")
+        print("[exit test] stop the packet-capture process")
         stop_tcpdump_cmd = 'sudo pkill -f "tcpdump -i enp0s8 -w /home/vagrant/server.pcap udp"'
         rst = conn.run(stop_tcpdump_cmd, timeout=10)
         if (rst.failed):
-            print('[退出测试] 这里为什么会出错')
+            print('[exit test] why did this fail')
         
-        print("[退出测试] 结束客户端和服务端进程运行")
+        print("[exit test] stop the client and server processes")
         stop_server_cmd = 'sudo pkill -f "/vagrant/tju_tcp/test/rdt_server"'
         stop_client_cmd = 'sudo pkill -f "/vagrant/tju_tcp/test/rdt_client"'
         try:
             rst = conn.local(stop_client_cmd)
             if (rst.failed):
-                print("[退出测试] 关闭本地测试程序失败")
+                print("[exit test] failed to stop the local test program")
         except Exception as e:
             pass 
         try:
             rst = conn.run(stop_server_cmd)
             if (rst.failed):
-                print("[退出测试] 关闭服务端测试程序失败")            
+                print("[exit test] failed to stop the server test program")
         except Exception as e: 
             pass 
         
-        print("[退出测试] 重置网络环境")    
+        print("[exit test] reset the network environment")
         reset_networf_cmd = 'sudo tcset enp0s8 --rate 100Mbps --delay 20ms --overwrite'
         rst = conn.run(reset_networf_cmd)
         if (rst.failed):
-            print("[退出测试程序] 重置服务端网络失败")    
+            print("[exit test program] failed to reset the server network")
         rst = conn.local(reset_networf_cmd)
         if (rst.failed):
-            print("[退出测试程序] 重置客户端网络失败")
+            print("[exit test program] failed to reset the client network")
 
     exit()
 
 def main():
     
     if socket.gethostname() == "server":
-        print("只能在client端运行自动测试")
+        print("The automated test can only run on the client side")
         exit()
 
     signal.signal(signal.SIGINT, my_exit)
     signal.signal(signal.SIGTERM, my_exit)
         
     print("====================================================================")
-    print("============================开始测试================================")
+    print("============================start test================================")
     print("====================================================================")
     with Connection(host="172.17.0.3", user=TEST_USER, connect_kwargs={'password':TEST_PASS}) as conn:
         
-        # 编译提交的源码
-        print("[自动测试] 编译提交源码")
+        # compile the submitted source code
+        print("[automated test] compile the submitted source code")
         print("> cd /vagrant/tju_tcp && make")
         rst = conn.run("cd /vagrant/tju_tcp && make", timeout=10)
         if (rst.failed):
-            print('[自动测试] 编译提交源码错误 停止测试')
+            print('[automated test] error compiling submitted source code; stopping the test')
             print('{"scores": {"establish_connection": 0}}')
             exit()
         print("")
         
-        # 判断是否使用用户提交的新Makefile
+        # Determine whether to use the new Makefile submitted by the user
         if os.path.exists("/vagrant/tju_tcp/test_Makefile"):
-            print("[自动测试] 检测到用户提供了自己的测试Makefile, 使用用户的测试Makefile替换自带的版本")
+            print("[automated test] Detected that the user provided a custom test Makefile; replacing the bundled version with the user Makefile")
             print("> cp /vagrant/tju_tcp/test_Makefile /vagrant/tju_tcp/test/Makefile")
             rst = conn.local("cp /vagrant/tju_tcp/test_Makefile /vagrant/tju_tcp/test/Makefile", timeout=10)
             if (rst.failed):
-                print("[自动测试] 移动测试Makefile失败")
+                print("[automated test] failed to move test Makefile")
                 exit()
         print("")
 
-        # 编译测试源码
-        print("[自动测试] 编译测试源码")
+        # compile the test source code
+        print("[automated test] compile the test source code")
         print("> cd /vagrant/tju_tcp/test && make")
         rst = conn.run("cd /vagrant/tju_tcp/test && make", timeout=10)
         if (rst.failed):
-            print('[自动测试] 编译测试源码错误 停止测试')
+            print('[automated test] error compiling test source code; stopping the test')
             print('{"scores": {"establish_connection": 0}}')
             exit()    
         print("")
 
 
-        print("============================ 抓包并绘制SeqNum随Time变化图 ================================")
+        print("============================ capture packets and draw the SeqNum-over-Time graph ================================")
 
-        # 保证没有上一次的抓包进程在运行
-        stop_tcpdump_cmd = 'sudo pkill -f "tcpdump -i enp0s8 -w /home/vagrant/server.pcap udp"' # pkill -f x kill含x的所有进程
+        # Ensure no previous packet-capture process is running
+        stop_tcpdump_cmd = 'sudo pkill -f "tcpdump -i enp0s8 -w /home/vagrant/server.pcap udp"' # pkill -f x kill all processes containing x
         rst = conn.run(stop_tcpdump_cmd, timeout=10)
         if (rst.failed):
-            print('[抓包并绘图] 这里为什么会出错')
+            print('[packet capture and plotting] why did this fail')
         
-        # 保证没有之前的客户端和服务端进程运行
+        # Ensure no previous client or server process is running
         stop_server_cmd = 'sudo pkill -f "/vagrant/tju_tcp/test/rdt_server"'
         stop_client_cmd = 'sudo pkill -f "/vagrant/tju_tcp/test/rdt_client"'
         try:
             rst = conn.local(stop_client_cmd)
             if (rst.failed):
-                print("[抓包并绘图] 关闭本地测试程序失败")
+                print("[packet capture and plotting] failed to stop the local test program")
         except Exception as e:
             pass 
         try:
             rst = conn.run(stop_server_cmd)
             if (rst.failed):
-                print("[抓包并绘图] 关闭服务端测试程序失败")            
+                print("[packet capture and plotting] failed to stop the server test program")
         except Exception as e: 
             pass 
 
-        # 保证建立连接的网络环境
+        # Ensure the network environment for establishing a connection
         reset_networf_cmd = 'sudo tcset enp0s8 --rate 100Mbps --delay 20ms --overwrite' 
         conn.run(reset_networf_cmd)
         if (rst.failed):
-            print("[数据传输测试] 重置服务端网络失败")
+            print("[data transfer test] failed to reset the server network")
         conn.local(reset_networf_cmd)
         if (rst.failed):
-            print("[数据传输测试] 重置客户端网络失败")
+            print("[data transfer test] failed to reset the client network")
 
-        print("[抓包并绘图] 清理上一次的抓包结果")
+        print("[packet capture and plotting] clean up the previous packet-capture result")
         erase_cmd = "sudo rm -f ~/server.pcap"
         rst = conn.run(erase_cmd, timeout=10)
         if (rst.failed):
-            print('[抓包并绘图] 清理上一次的抓包结果错误')
+            print('[packet capture and plotting] error cleaning up the previous packet-capture result')
             exit()
         
 
 
-        # 进行数据传输前，先开始抓包
-        print("[抓包并绘图] 开始在服务端抓包")
+        # Start packet capture before data transfer
+        print("[packet capture and plotting] start packet capture on the server")
         start_tcpdump_cmd = "sudo tcpdump -i enp0s8 -w /home/vagrant/server.pcap udp > /dev/null 2> /dev/null < /dev/null & " 
-        # > /dev/null 忽略命令正常执行的输出; 2> /dev/null 忽略错误输出; < /dev/null 避免脚本等待输入; & 设置进程为后台进程
+        # > /dev/null ignore normal command output; 2> /dev/null ignore error output; < /dev/null prevent the script from waiting for input; & run the process in the background
         rst = conn.run(start_tcpdump_cmd, timeout=10)
         if (rst.failed):
-            print('[抓包并绘图] 服务端开启抓包失败')
+            print('[packet capture and plotting] failed to start packet capture on the server')
             conn.run(stop_tcpdump_cmd, timeout=10)
             exit()
 
-        # 先开启服务端等待接收数据，再开启客户端开始发送数据
-        print("[抓包并绘图] 开启服务端和客户端")
+        # Start the server first so it waits to receive data, then start the client to send data
+        print("[packet capture and plotting] start the server and client")
         start_server_cmd = 'nohup sudo /vagrant/tju_tcp/test/rdt_server > /vagrant/tju_tcp/test/server.log 2>&1 < /dev/null & '
         start_client_cmd = 'nohup sudo /vagrant/tju_tcp/test/rdt_client > /vagrant/tju_tcp/test/client.log 2>&1 < /dev/null & '
-        # nohup 用于在系统后台不挂断地运行命令，退出终端不会影响程序的运行
-        # 2>&1代表将stderr重定向到文件描述符为1的文件(即/dev/stdout)中
+        # nohup runs the command in the system background without hanging up, so exiting the terminal does not affect the program
+        # 2>&1means redirect stderr to the file descriptor 1 target, namely /dev/stdout
         rst = conn.run(start_server_cmd, pty=False)
         if (rst.failed):
-            print("[抓包并绘图] 无法运行服务端测试程序")
+            print("[packet capture and plotting] unable to run the server test program")
             exit()
         rst = conn.local(start_client_cmd, pty=False)
         if (rst.failed):
-            print("[抓包并绘图] 无法运行客户端测试程序")
+            print("[packet capture and plotting] unable to run the client test program")
             exit()
         
-        # 等待建立连接
-        print("[抓包并绘图] 等待6s建立连接")
+        # wait for connection establishment
+        print("[packet capture and plotting] wait 6s for connection establishment")
         time.sleep(6)
         
-        # 连接建立 模拟网络延迟 丢包
+        # After connection establishment, simulate network delay and packet loss
         set_networf_cmd = 'sudo tcset enp0s8 --rate %dMbps --delay %dms --delay-distro %d --loss %d%% --overwrite'%(rate, delay, delay_distro, loss)
-        print("[抓包并绘图] 建立连接后  设置双方的网络通讯速率 丢包率 和延迟: %s"%set_networf_cmd)
+        print("[packet capture and plotting] after connection establishment, set both sides network communication rate, packet loss rate, and delay: %s"%set_networf_cmd)
         rst = conn.run(set_networf_cmd)
         if (rst.failed):
-            print("[抓包并绘图] 无法设置服务端网络")
+            print("[packet capture and plotting] unable to configure the server network")
             exit()
         rst = conn.local(set_networf_cmd)
         if (rst.failed):
-            print("[抓包并绘图] 无法设置客户端网络")
+            print("[packet capture and plotting] unable to configure the client network")
             exit()
 
-        # 等待60s的数据传输
-        print("[抓包并绘图] 等待60s 进行双方通信")
+        # wait 60s for data transfer
+        print("[packet capture and plotting] wait 60s while both sides communicate")
         time.sleep(60)
         
-        # 停止抓包
-        print("[抓包并绘图] 停止抓包")
+        # stop packet capture
+        print("[packet capture and plotting] stop packet capture")
         stop_tcpdump_cmd = 'sudo pkill -f "tcpdump -i enp0s8 -w /home/vagrant/server.pcap udp"'
         rst = conn.run(stop_tcpdump_cmd, timeout=10)
         if (rst.failed):
-            print('[抓包并绘图] 这里为什么会出错')
+            print('[packet capture and plotting] why did this fail')
 
-        # 关闭测试服务端和客户端
-        print("[抓包并绘图] 关闭双端")
+        # stop the test server and client
+        print("[packet capture and plotting] stop both endpoints")
         stop_server_cmd = 'sudo pkill -f "/vagrant/tju_tcp/test/rdt_server"'
         stop_client_cmd = 'sudo pkill -f "/vagrant/tju_tcp/test/rdt_client"'
         try:
             rst = conn.local(stop_client_cmd)
             if (rst.failed):
-                print("[抓包并绘图] 关闭本地测试程序失败")
+                print("[packet capture and plotting] failed to stop the local test program")
         except Exception as e:
             pass 
         try:
             rst = conn.run(stop_server_cmd)
             if (rst.failed):
-                print("[抓包并绘图] 关闭服务端测试程序失败")            
+                print("[packet capture and plotting] failed to stop the server test program")
         except Exception as e: 
             pass 
 
-        # 取消延迟 丢包等网络配置
-        print("[抓包并绘图] 取消网络设置")
+        # remove network settings such as delay and packet loss
+        print("[packet capture and plotting] remove network settings")
         reset_networf_cmd = 'sudo tcset enp0s8 --rate 100Mbps --delay 20ms --overwrite'
         conn.run(reset_networf_cmd)
         if (rst.failed):
-            print("[数据传输测试] 重置服务端网络失败")
+            print("[data transfer test] failed to reset the server network")
         conn.local(reset_networf_cmd)
         if (rst.failed):
-            print("[数据传输测试] 重置客户端网络失败")
+            print("[data transfer test] failed to reset the client network")
 
-        # 执行绘图程序
-        print("[抓包并绘图] 根据抓包结果绘制图像")
+        # run the plotting program
+        print("[packet capture and plotting] draw graphs from packet-capture results")
         gen_graph_cmd = "python3 /vagrant/tju_tcp/test/gen_graph_seq.py"
         rst = conn.run(gen_graph_cmd)
         if (rst.failed):
-            print("[抓包并绘图] 绘图失败")
+            print("[packet capture and plotting] plotting failed")
             exit()
 
 

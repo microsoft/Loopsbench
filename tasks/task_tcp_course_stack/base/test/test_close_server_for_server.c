@@ -1,8 +1,8 @@
 #include "tju_tcp.h"
 #include <string.h>
 
-int TEST_TYPE;  //0 测试先后断开
-                //1 测试同时断开
+int TEST_TYPE;  //0 test sequential teardown
+                //1 test simultaneous teardown
 
 int main(int argc, char **argv) { 
     startSimulation();
@@ -23,15 +23,15 @@ int main(int argc, char **argv) {
     if (argc==2){
         TEST_TYPE = atoi(argv[1]);
         if (TEST_TYPE==0){
-            printf("[服务端] 测试双方先后断开连接的情况\n");
+            printf("[server] testing the case where both sides close the connection sequentially\n");
             while(new_conn->state != CLOSED){}
         }
         else if (TEST_TYPE==1){
-            printf("[服务端] 测试双方同时断开连接的情况\n");
+            printf("[server] testing the case where both sides close the connection simultaneously\n");
             tju_close(new_conn);
         }
         else{
-            printf("[服务端] 未知测试类型\n");
+            printf("[server] unknown test type\n");
         }
     }
     

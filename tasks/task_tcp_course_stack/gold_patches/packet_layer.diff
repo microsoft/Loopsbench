@@ -1,8 +1,8 @@
 --- a/src/tju_packet.c	2026-04-09 05:16:44.338226531 +0000
 +++ b/src/tju_packet.c	2026-04-09 05:30:46.933141610 +0000
 @@ -6,11 +6,30 @@
-  构造tju_packet_t
-  返回其指针
+  Construct a tju_packet_t
+  Return its pointer
   */
 -tju_packet_t* create_packet(uint16_t src, uint16_t dst, uint32_t seq,
 -    uint32_t ack, uint16_t hlen, uint16_t plen, uint8_t flags,
@@ -36,7 +36,7 @@
  
  /*
 @@ -19,10 +38,19 @@
-  返回其对应的字符串
+  Return its corresponding byte string
   */
  char* create_packet_buf(uint16_t src, uint16_t dst, uint32_t seq, uint32_t ack,
 -    uint16_t hlen, uint16_t plen, uint8_t flags, uint16_t adv_window,
@@ -136,7 +136,7 @@
  
  
 @@ -88,10 +134,51 @@
-  构造并返回header的字符串
+  Construct and return the header byte string
   */
  char* header_in_char(uint16_t src, uint16_t dst, uint32_t seq, uint32_t ack,
 -    uint16_t hlen, uint16_t plen, uint8_t flags, uint16_t adv_window,
@@ -191,7 +191,7 @@
  
  /*
 @@ -99,6 +186,15 @@
-  构造并返回对应的字符串
+  construct and return the corresponding byte string
   */
  char* packet_to_buf(tju_packet_t* p){
 -    /* TODO: implement */

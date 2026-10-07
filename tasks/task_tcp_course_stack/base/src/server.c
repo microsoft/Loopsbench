@@ -8,11 +8,11 @@
 #define MAXSIZE 50 * MIN_LEN* MIN_LEN
 
 int t_times = 5000;
-char allbuf[MAXSIZE] = {'\0'}; //设置全局变量
+char allbuf[MAXSIZE] = {'\0'}; //set a global variable
 
 void fflushbeforeexit(int signo)
 {
-    printf("意外退出server\n");
+    printf("server exited unexpectedly\n");
 
     FILE* wfile;
     wfile = fopen("./rdt_recv_file.txt", "w");
@@ -40,7 +40,7 @@ int main(int argc, char** argv)
     signal(SIGINT, fflushbeforeexit);
     signal(SIGQUIT, fflushbeforeexit);
 
-    // 开启仿真环境
+    // Start the simulation environment
     startSimulation();
 
     tju_tcp_t* my_server = tju_socket();
@@ -58,7 +58,7 @@ int main(int argc, char** argv)
     sleep_no_wake(4);
 
     // tju_close(new_conn);
-    // printf("等待10s确保连接完全断开\n");
+    // printf("wait 10s to ensure the connection is fully closed\n");
     // sleep_no_wake(10);
 
     int cnt = 0;

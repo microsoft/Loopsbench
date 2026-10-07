@@ -6,7 +6,7 @@
 #define EACHSIZE 10*MIN_LEN
 #define MAXSIZE 50*MIN_LEN*MIN_LEN
 
-// 全局变量
+// global variable
 int t_times = 5000;
 
 void sleep_no_wake(int sec){  
@@ -16,13 +16,13 @@ void sleep_no_wake(int sec){
 }
 
 int main(int argc, char **argv) {
-    // 开启仿真环境 
+    // Start the simulation environment
     startSimulation();
 
     tju_tcp_t* my_socket = tju_socket();
     
     tju_sock_addr target_addr;
-    target_addr.ip = inet_network("172.17.0.3");
+    target_addr.ip = inet_network(SERVER_IP);
     target_addr.port = 1234;
 
     tju_connect(my_socket, target_addr);

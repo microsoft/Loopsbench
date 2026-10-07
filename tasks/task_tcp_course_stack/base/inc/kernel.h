@@ -11,41 +11,41 @@ tju_tcp_t* listen_socks[MAX_SOCK];
 tju_tcp_t* established_socks[MAX_SOCK];
 
 /*
-模拟Linux内核收到一份TCP报文的处理函数
+Handler that simulates the Linux kernel receiving a TCP packet
 */
 void onTCPPocket(char* pkt);
 
 
 /*
-以用户填写的TCP报文为参数
-根据用户填写的TCP的目的IP和目的端口,向该地址发送数据报
+Takes the user-filled TCP packet as an argument
+Sends the datagram to the TCP destination IP and destination port provided by the user
 */
 void sendToLayer3(char* packet_buf, int packet_len);
 
 
 /*
-开启仿真, 运行起后台线程
+Start the simulation and launch the background thread
 */
 void startSimulation();
 
 
 /*
- 使用UDP进行数据接收的线程
+ Thread that receives data over UDP
 */
 void* receive_thread(void * in);
 
-// 接受UDP的socket的标识符
+// Identifier of the socket that receives UDP packets
 int BACKEND_UDPSOCKET_ID;
 
 
 /*
- linux内核会根据
- 本地IP 本地PORT 远端IP 远端PORT 计算hash值 四元组 
- 找到唯一的那个socket
+ The Linux kernel uses
+ local IP, local port, remote IP, and remote port to compute a four-tuple hash value
+ to find the unique socket
 
- (实际上真正区分socket的是五元组
-  还有一个协议字段
-  不过由于本项目是TCP 协议都一样, 就没必要了)
+ (In reality sockets are distinguished by a five-tuple
+  which also includes a protocol field
+  but since this project is TCP-only and the protocol is always the same, it is unnecessary here)
 */
 int cal_hash(uint32_t local_ip, uint16_t local_port, uint32_t remote_ip, uint16_t remote_port);
 

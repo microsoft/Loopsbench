@@ -2,9 +2,9 @@
 
 
 /*
- 输入header所有字段 和 TCP包数据内容及其长度
- 构造tju_packet_t
- 返回其指针
+ Input all header fields plus the TCP packet data and its length
+ Construct a tju_packet_t
+ Return its pointer
  */
 tju_packet_t* create_packet(uint16_t src, uint16_t dst, uint32_t seq,
     uint32_t ack, uint16_t hlen, uint16_t plen, uint8_t flags,
@@ -14,9 +14,9 @@ tju_packet_t* create_packet(uint16_t src, uint16_t dst, uint32_t seq,
 }
 
 /*
- 输入header所有字段 和 TCP包数据内容及其长度
- 构造tju_packet_t 
- 返回其对应的字符串
+ Input all header fields plus the TCP packet data and its length
+ Construct a tju_packet_t
+ Return its corresponding byte string
  */
 char* create_packet_buf(uint16_t src, uint16_t dst, uint32_t seq, uint32_t ack,
     uint16_t hlen, uint16_t plen, uint8_t flags, uint16_t adv_window,
@@ -26,7 +26,7 @@ char* create_packet_buf(uint16_t src, uint16_t dst, uint32_t seq, uint32_t ack,
 }
 
 /*
- 清除一个tju_packet_t的内存占用
+ Release the memory used by a tju_packet_t
  */
 void free_packet(tju_packet_t* packet){
     if(packet->data != NULL)
@@ -36,9 +36,9 @@ void free_packet(tju_packet_t* packet){
 
 
 /*
- 下面的函数全部都是从一个packet的字符串中
- 根据各个字段的偏移量
- 找到并返回对应的字段
+ All of the following functions operate on a packet byte string
+ using each field offset
+ to locate and return the corresponding field
 */ 
 
 uint16_t get_src(char* msg){
@@ -80,12 +80,12 @@ uint8_t get_ext(char* msg){
 
 
 
-/*############################################## 下面是实现上面函数功能的辅助函数 用户没必要调用 ##############################################*/
+/*############################################## The following helper functions implement the functions above; users do not need to call them ##############################################*/
 
 
 /*
- 传入header所需的各种数据
- 构造并返回header的字符串
+ Pass in the data required by the header
+ Construct and return the header byte string
  */
 char* header_in_char(uint16_t src, uint16_t dst, uint32_t seq, uint32_t ack,
     uint16_t hlen, uint16_t plen, uint8_t flags, uint16_t adv_window,
@@ -95,8 +95,8 @@ char* header_in_char(uint16_t src, uint16_t dst, uint32_t seq, uint32_t ack,
 }
 
 /*
- 根据传入的tju_packet_t指针
- 构造并返回对应的字符串
+ Using the provided tju_packet_t pointer
+ construct and return the corresponding byte string
  */
 char* packet_to_buf(tju_packet_t* p){
     /* TODO: implement */
