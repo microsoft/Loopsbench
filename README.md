@@ -43,7 +43,7 @@ Key properties:
 
 - **Long-horizon structure**: tasks are decomposed into modules and separately testable units.
 - **Terminal realism**: agents work inside task containers with command-line tools, logs, and test scripts.
-- **Reproducible execution**: Docker-backed tasks use local builds by default, with optional remote or existing local images.
+- **Reproducible execution**: task environments are built from Dockerfiles, with support for prebuilt images.
 - **Agent breadth**: built-in adapters include Oracle, Mini SWE-agent, SWE-agent, OpenHands, Claude Code, Cursor, Codex, Qwen Code, and Copilot.
 - **Contribution safety**: untrusted task PRs are validated by trusted workflow code before merge.
 
@@ -51,7 +51,7 @@ Key properties:
 
 - The [LoopsBench paper](https://arxiv.org/abs/2608.00267) is now available on arXiv.
 - GitHub-native task proposals and PR validation are now included in this repository.
-- `loopsbench run` defaults to the recommended `local-build` strategy and also supports `remote` and `local-existing`.
+- LoopsBench builds task images locally by default. Use `remote` or `local-existing` to reuse prebuilt images.
 - Task publishing emits deterministic bundles and SHA-256 checksums from trusted default-branch workflows.
 - API documentation is generated automatically and deployed to [loopsbench.ai](https://loopsbench.ai).
 
@@ -81,19 +81,16 @@ python -m loopsbench.cli.main --help
 
 ## Quick Start
 
-To work from the published benchmark release, download the latest task snapshot, verify the checksum, and extract it. The archive creates a local `tasks/` directory used by the commands below:
+Download the task bundle from [Hugging Face](https://huggingface.co/datasets/LoopsBench/LoopsBench), verify its checksum, and extract it into a local `tasks/` directory:
 
 ```bash
-mkdir -p loopsbench-release
-cd loopsbench-release
-# Or download the same three files from the latest GitHub release page.
-gh release download --repo microsoft/Loopsbench \
-  --pattern 'loopsbench-tasks-*.tar.zst' \
-  --pattern 'loopsbench-tasks-*.tar.zst.sha256' \
-  --pattern 'loopsbench-tasks-*.manifest.json'
+python -m pip install huggingface_hub
+mkdir -p loopsbench-data
+cd loopsbench-data
+hf download LoopsBench/LoopsBench --repo-type dataset \
+  --include 'loopsbench-tasks-*' --local-dir .
 sha256sum -c loopsbench-tasks-*.tar.zst.sha256
 tar --zstd -xf loopsbench-tasks-*.tar.zst
-# The archive creates ./tasks.
 ```
 
 List benchmark tasks from the local `tasks/` dataset directory:
@@ -108,29 +105,16 @@ Validate task metadata and required files:
 loopsbench tasks validate --tasks-dir tasks
 ```
 
-Run the example task with the Oracle agent and a local Docker build. `local-build` is the default and recommended strategy; the explicit flag below can be omitted:
+Run the example task with Oracle, which applies the reference solution. LoopsBench builds the task image locally by default:
 
 ```bash
 loopsbench run \
   --dataset-path tasks \
   --task-id task_tcp_course_stack \
-  --agent oracle \
-  --docker-image-strategy local-build
+  --agent oracle
 ```
 
-For tasks with published images, you can explicitly select `remote`. Its default Docker Hub namespace is `loopsbench`, and its default tag is `latest`, producing names such as `loopsbench/loopsbench-task-tcp-course-stack:latest`. Both defaults can be overridden with `--docker-image-namespace` and `--docker-image-tag`. Use the same `model-env.yaml` pattern described in Configuration:
-
-```bash
-loopsbench run \
-  --dataset-path tasks \
-  --task-id task_tcp_course_stack \
-  --agent codex \
-  --model provider/model-name \
-  --model-config model-env.yaml \
-  --docker-image-strategy remote \
-  --docker-image-namespace loopsbench \
-  --docker-image-tag latest
-```
+To use a published image from the `loopsbench` Docker Hub namespace, add `--docker-image-strategy remote`. See the [running guide](docs/guides/running.md#docker-image-strategies) for image tags and custom namespaces.
 
 ## Configuration
 
@@ -169,6 +153,8 @@ Then pass it with:
 ```bash
 loopsbench run --config run.yaml --model-config model-env.yaml
 ```
+
+See [network access](docs/guides/running.md#network-access) for container network settings and additional allowed hosts.
 
 ## Python API
 
@@ -287,11 +273,3 @@ Please cite the LoopsBench paper and record the repository version or commit SHA
 ## License
 
 This project is licensed under the [MIT License](LICENSE). Third-party agent integrations and vendored components may carry their own licenses; review their local license files before redistribution.
-
-
-Network access is controlled by phase: public preparation, an agent endpoint
-allowlist, and an offline tester. Hosts from runner-supplied model URLs are
-allowed automatically. Add other required hosts with `--allow-agent-host`
-or the run YAML `network` settings. All agent types and custom imports remain
-supported; old task directories need no network assets. These controls apply to
-task containers; host tools and provider-hosted search need agent-side controls.

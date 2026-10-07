@@ -24,21 +24,18 @@ pip install -e .
 loopsbench --help
 ```
 
-## Get Tasks from a Release
+## Download Tasks
 
-Download the latest published task snapshot from GitHub Releases, verify the checksum, and extract it. The archive materializes a local `tasks/` directory, which is the dataset path used in the commands below:
+Download the task bundle from [Hugging Face](https://huggingface.co/datasets/LoopsBench/LoopsBench). The commands below verify the archive and extract it into `tasks/`, ready for the harness:
 
 ```bash
-mkdir -p loopsbench-release
-cd loopsbench-release
-# Or download the same three files from the latest GitHub release page.
-gh release download --repo microsoft/Loopsbench \
-  --pattern 'loopsbench-tasks-*.tar.zst' \
-  --pattern 'loopsbench-tasks-*.tar.zst.sha256' \
-  --pattern 'loopsbench-tasks-*.manifest.json'
+python -m pip install huggingface_hub
+mkdir -p loopsbench-data
+cd loopsbench-data
+hf download LoopsBench/LoopsBench --repo-type dataset \
+  --include 'loopsbench-tasks-*' --local-dir .
 sha256sum -c loopsbench-tasks-*.tar.zst.sha256
 tar --zstd -xf loopsbench-tasks-*.tar.zst
-# The archive creates ./tasks.
 ```
 
 ## Inspect Tasks
@@ -57,14 +54,13 @@ loopsbench tasks validate --tasks-dir tasks
 
 ## Run the Oracle Baseline
 
-The Oracle agent applies the task solution and is useful for validating task packaging. `local-build` is the default and recommended image strategy for benchmark runs; the explicit flag below can be omitted:
+Oracle applies the reference solution to check that a task runs correctly. LoopsBench builds the task image locally by default:
 
 ```bash
 loopsbench run \
   --dataset-path tasks \
   --task-id task_tcp_course_stack \
-  --agent oracle \
-  --docker-image-strategy local-build
+  --agent oracle
 ```
 
 ## Run a Model-Backed Agent
@@ -86,13 +82,12 @@ loopsbench run \
   --task-id task_tcp_course_stack \
   --agent codex \
   --model provider/model-name \
-  --model-config model-env.yaml \
-  --docker-image-strategy local-build
+  --model-config model-env.yaml
 ```
 
 ## Use Remote Task Images
 
-For tasks with published images, explicitly select `remote`. It defaults to the Docker Hub namespace `loopsbench` and tag `latest`, for example `loopsbench/loopsbench-task-tcp-course-stack:latest`. Use `--docker-image-namespace` or `--docker-image-tag` to override these defaults.
+To run a task with a published image, select `remote`. Images are pulled from the `loopsbench` Docker Hub namespace with the `latest` tag:
 
 ```bash
 loopsbench run \
@@ -101,10 +96,10 @@ loopsbench run \
   --agent codex \
   --model provider/model-name \
   --model-config model-env.yaml \
-  --docker-image-strategy remote \
-  --docker-image-namespace loopsbench \
-  --docker-image-tag latest
+  --docker-image-strategy remote
 ```
+
+See [Docker image strategies](guides/running.md#docker-image-strategies) for custom namespaces and tags.
 
 ## Review Results
 

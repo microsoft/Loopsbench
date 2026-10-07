@@ -40,15 +40,15 @@ loopsbench run \
 
 ## Docker Image Strategies
 
-LoopsBench defaults to `local-build`, the recommended strategy for benchmark runs. CLI options, YAML run configurations, and the Python `Harness` API use the same default. Three strategies are available:
+We recommend `local-build` for benchmark runs. It is the default and builds each task's image from the supplied Dockerfile.
 
 | Strategy | Behavior | Typical use |
 | --- | --- | --- |
-| `local-build` (default, recommended) | Build images locally from each task's `docker-compose.yaml`. | Benchmark runs, task authoring, and validation. |
-| `remote` | Pull prebuilt task images from a registry. | Optional use of published task images. |
+| `local-build` (default) | Build images locally using each task's Compose configuration. | Benchmark runs and task development. |
+| `remote` | Pull prebuilt task images from a registry. | Running tasks with published images. |
 | `local-existing` | Reuse images already present on the machine. | Debugging or offline reruns. |
 
-When explicitly selected, `remote` defaults to the Docker Hub namespace `loopsbench` and tag `latest`. Task IDs are lowercased and underscores become hyphens: `task_tcp_course_stack` uses `loopsbench/loopsbench-task-tcp-course-stack:latest`. The namespace and tag can be overridden. Use this mode for tasks whose images have been published:
+Use `remote` to pull a published task image from Docker Hub. The default namespace is `loopsbench` and the default tag is `latest`:
 
 ```bash
 loopsbench run \
@@ -56,10 +56,18 @@ loopsbench run \
   --task-id task_tcp_course_stack \
   --agent codex \
   --model provider/model-name \
-  --docker-image-strategy remote \
-  --docker-image-namespace loopsbench \
-  --docker-image-tag latest
+  --docker-image-strategy remote
 ```
+
+For example, `task_tcp_course_stack` uses `loopsbench/loopsbench-task-tcp-course-stack:latest`. Pass `--docker-image-namespace` or `--docker-image-tag` to use another namespace or version.
+
+## Network Access
+
+Environment preparation has network access. During solving, the agent's task container can reach the model endpoint hosts from the run configuration. Tests run without external network access, so their dependencies need to be installed in the task image.
+
+To allow additional hosts during solving, add `--allow-agent-host HOST` for each host or list them under `network.extra_allowed_hosts` in the run YAML.
+
+These settings apply to task containers. Host-side tools and search features provided by a model service need to be configured separately.
 
 ## YAML Run Config
 

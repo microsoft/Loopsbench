@@ -8,7 +8,7 @@ LoopsBench evaluates AI coding agents on long-horizon terminal tasks. Each task 
 ## What LoopsBench Provides
 
 - A Python package and CLI for listing tasks, validating tasks, and running agents.
-- Docker-backed task execution with the recommended local-build default and optional remote or local-existing image strategies.
+- Task execution in Docker, with local builds and prebuilt images.
 - Built-in adapters for Oracle, Mini SWE-agent, SWE-agent, OpenHands, Claude Code, Cursor, Codex, Qwen Code, and Copilot.
 - A GitHub-native contribution workflow for task proposals, task PRs, validation, and trusted publishing.
 - Generated API documentation for the modules that power the benchmark harness.
