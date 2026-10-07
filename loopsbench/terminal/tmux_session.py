@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,11 +34,13 @@ class TmuxSession:
         session_name: str,
         commands_path: Path | None = None,
         container_name: str | None = None,
+        network_controller=None,
     ):
         self._container = container
         self._session_name = session_name
         self._commands_path = commands_path
         self._container_name = container_name
+        self._network_controller = network_controller
         self._logger = logger.getChild(__name__)
 
         # Create the tmux session inside the container.
@@ -59,6 +62,11 @@ class TmuxSession:
         return stdout
 
     # -- public API --
+
+    def agent_network_phase(self):
+        if self._network_controller is None:
+            return nullcontext()
+        return self._network_controller.agent_network_phase()
 
     def _append_command_log(self, keys: str) -> None:
         if self._commands_path is None:
@@ -199,7 +207,7 @@ class TmuxSession:
         if capture_entire:
             # Capture full scrollback into the tmux buffer, then read it.
             self._exec(f"tmux capture-pane -t {self._session_name} -S -")
-            return self._exec(f"tmux show-buffer")
+            return self._exec("tmux show-buffer")
         else:
             # Capture only the visible pane directly to stdout.
             return self._exec(

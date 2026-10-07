@@ -287,3 +287,10 @@ Please cite the LoopsBench paper and record the repository version or commit SHA
 ## License
 
 This project is licensed under the [MIT License](LICENSE). Third-party agent integrations and vendored components may carry their own licenses; review their local license files before redistribution.
+
+
+Network access is controlled by phase: public preparation, an agent endpoint
+allowlist, and an offline tester. Add model endpoints with `--allow-agent-host`
+or the run YAML `network` settings. All agent types and custom imports remain
+supported; old task directories need no network assets. These controls apply to
+task containers; host tools and provider-hosted search need agent-side controls.

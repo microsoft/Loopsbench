@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tarfile
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -14,6 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator, Mapping, Sequence
 
 from loopsbench.task_images.strategy import DockerImageStrategy
+from loopsbench.terminal.network_policy import (
+    NetworkPlan,
+    NetworkPolicy,
+    controlled_compose,
+)
 from loopsbench.utils.compose_env import compose_runtime_env
 from loopsbench.utils.env_model import EnvModel
 from loopsbench.utils.logger import logger
@@ -109,6 +115,7 @@ class DockerComposeManager:
         logs_path: Path | None = None,
         agent_logs_path: Path | None = None,
         task_dir: Path | str | None = None,
+        network: NetworkPlan | None = None,
     ):
         docker_module = _get_docker_module()
         try:
@@ -142,6 +149,9 @@ class DockerComposeManager:
         self._logs_path = logs_path
         self._agent_logs_path = agent_logs_path
         self._logger = logger.getChild(__name__)
+        self._network = network
+        self._network_temp = None
+        self._network_controllers: dict[str, str] = {}
         self._image_resolution = DockerImageResolution(
             requested_client_image_ref=self._client_image_name
         )
@@ -326,6 +336,7 @@ class DockerComposeManager:
             )
 
     def start(self) -> Container:
+        self._configure_network()
         if self._docker_image_strategy == DockerImageStrategy.REMOTE:
             self._pull_remote_image()
             self._capture_image_resolution()
@@ -392,6 +403,10 @@ class DockerComposeManager:
                     )
             except Exception as exc:
                 self._logger.warning(f"git init in workspace failed: {exc}")
+        # Tester preparation is complete. Keep its policy independent of client
+        # phase restoration while the regression worker runs concurrently.
+        if self._network is not None:
+            self.set_network_policy("tester", self._network.verifier)
         return self._client_container
 
     @property
@@ -409,6 +424,49 @@ class DockerComposeManager:
                 self._run_compose(["down", "--rmi", "all", "--volumes"])
         except Exception as exc:
             self._logger.error(f"Error stopping compose services: {exc}")
+        finally:
+            if self._network_temp is not None:
+                self._network_temp.cleanup()
+                self._network_temp = None
+
+    def _configure_network(self) -> None:
+        if self._network is None:
+            return
+        document = json.loads(self._run_compose(["config", "--format", "json"]).stdout)
+        image = "loopsbench-egress:harbor-702b860-v1"
+        document, self._network_controllers = controlled_compose(document, self._network, image)
+        if not self._network_controllers:
+            return
+        # This is harness infrastructure, separate from the task-image strategy.
+        self._run_docker(["build", "-t", image, str(Path(__file__).parent / "egress")])
+        self._network_temp = tempfile.TemporaryDirectory(prefix="loopsbench-network-")
+        path = Path(self._network_temp.name) / "compose.json"
+        # Compose config already escapes literal dollars for a round trip.
+        path.write_text(json.dumps(document))
+        self._compose_files = [path]
+        if self._logs_path is not None:
+            self._logs_path.mkdir(parents=True, exist_ok=True)
+            record = self._network.model_dump()
+            record["agent"] = self._network.agent_policy().model_dump()
+            record["scope"] = "task Docker containers; host agent controllers are outside this boundary"
+            (self._logs_path / "network-policy.json").write_text(json.dumps(record, indent=2))
+
+    def set_network_policy(self, service: str, policy: NetworkPolicy) -> None:
+        controller = self._network_controllers.get(service)
+        if controller is None:
+            return
+        self._run_compose(["exec", "-T", controller, *policy.command()])
+
+    @contextmanager
+    def agent_network_phase(self):
+        if self._network is None:
+            yield
+            return
+        self.set_network_policy("client", self._network.agent_policy())
+        try:
+            yield
+        finally:
+            self.set_network_policy("client", self._network.environment)
 
     def build(self) -> None:
         self._run_compose(["build"])

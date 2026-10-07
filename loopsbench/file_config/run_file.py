@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loopsbench.agents.agent_name import AgentName
 from loopsbench.task_images.strategy import DockerImageStrategy
+from loopsbench.terminal.network_policy import NetworkPlan
 
 
 class LoopsBenchRunFileConfig(BaseModel):
@@ -37,6 +38,7 @@ class LoopsBenchRunFileConfig(BaseModel):
     n_concurrent_trials: int | None = None
     n_attempts: int | None = None
     agent_kwargs: dict[str, Any] = Field(default_factory=dict)
+    network: NetworkPlan | None = None
     global_timeout_multiplier: float | None = None
     global_agent_timeout_sec: float | None = None
     global_test_timeout_sec: float | None = None

@@ -14,7 +14,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime, timezone
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -45,31 +44,34 @@ from loopsbench.harness.models import (
     build_run_metadata,
     write_task_image_resolution,
 )
+from loopsbench.harness.regression_harness import (
+    HarnessConfig as RegressionHarnessConfig,
+)
+from loopsbench.harness.regression_harness import (
+    RegressionHarness,
+)
 from loopsbench.parsers._pytest_tail_session import tail_case_id
 from loopsbench.parsers.base_parser import ParseContext, UnitTestStatus
 from loopsbench.parsers.parser_factory import ParserFactory, ResultFormat
-from loopsbench.utils.logger import logger
-from loopsbench.terminal.docker_compose_manager import (
-    DockerComposeManager,
-    DockerImageResolution,
-    docker_command,
-    docker_env,
-)
-from loopsbench.terminal.terminal import (
-    Terminal,
-    TerminalStartupError,
-    spin_up_terminal,
-)
-from loopsbench.harness.regression_harness import (
-    HarnessConfig as RegressionHarnessConfig,
-    RegressionHarness,
-)
 from loopsbench.task_images.strategy import (
     DockerImageStrategy,
     effective_remote_docker_image_tag,
     resolve_task_docker_image,
     validate_remote_docker_image_coordinates,
 )
+from loopsbench.terminal.docker_compose_manager import (
+    DockerComposeManager,
+    DockerImageResolution,
+    docker_command,
+    docker_env,
+)
+from loopsbench.terminal.network_policy import NetworkPlan
+from loopsbench.terminal.terminal import (
+    Terminal,
+    TerminalStartupError,
+    spin_up_terminal,
+)
+from loopsbench.utils.logger import logger
 
 # Merged with each task compose so the tester mounts host `tests/` + `run-tests.sh`.
 _REGRESSION_COMPOSE_PATH = Path(__file__).resolve().parent / "regression.compose.yaml"
@@ -107,7 +109,9 @@ class Harness:
         global_timeout_multiplier: float = 1.0,
         global_agent_timeout_sec: float | None = None,
         global_test_timeout_sec: float | None = None,
+        network: NetworkPlan | dict | None = None,
     ):
+        self._network = NetworkPlan.from_config(network)
         self._start_time = datetime.now(timezone.utc).isoformat()
 
         self._dataset_path = dataset_path
@@ -1001,12 +1005,14 @@ PY
         agent: BaseAgent,
         instruction: str,
     ) -> AgentResult | None:
-        return agent.perform_task(
-            instruction=instruction,
-            session=session,
-            logging_dir=logging_dir,
-            timeout_sec=timeout_sec,
-        )
+        agent.prepare(session=session, logging_dir=logging_dir)
+        with session.agent_network_phase():
+            return agent.perform_task(
+                instruction=instruction,
+                session=session,
+                logging_dir=logging_dir,
+                timeout_sec=timeout_sec,
+            )
 
     def _run_agent(
         self,
@@ -1025,12 +1031,14 @@ PY
         logging_dir = logging_dir or handler.trial_paths.agent_logging_dir
 
         try:
-            result = agent.perform_task(
-                instruction=instruction,
-                session=session,
-                logging_dir=logging_dir,
-                timeout_sec=timeout,
-            )
+            agent.prepare(session=session, logging_dir=logging_dir)
+            with session.agent_network_phase():
+                result = agent.perform_task(
+                    instruction=instruction,
+                    session=session,
+                    logging_dir=logging_dir,
+                    timeout_sec=timeout,
+                )
             if result is None:
                 return None, FailureMode.UNKNOWN_AGENT_ERROR
             return result, FailureMode(result.failure_mode)
@@ -1348,6 +1356,7 @@ PY
             no_rebuild=self._no_rebuild,
             cleanup=self._cleanup,
             task_dir=handler.task_dir.resolve(),
+            network=self._network,
         )
         with ExitStack() as stack:
             try:
@@ -1861,6 +1870,7 @@ PY
             start_time=self._start_time,
             s3_bucket=loopsbench_config.s3_bucket_name,
             agent_kwargs=self._agent_kwargs,
+            network=self._network.model_dump(),
         )
         self._run_metadata_output_path.write_text(
             metadata.model_dump_json(indent=4)

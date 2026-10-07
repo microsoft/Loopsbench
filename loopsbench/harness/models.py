@@ -12,7 +12,6 @@ from pydantic import UUID4, BaseModel, Field, computed_field
 from loopsbench.parsers.base_parser import UnitTestStatus
 from loopsbench.task_images.strategy import DockerImageStrategy
 
-
 # ---------------------------------------------------------------------------
 # Failure modes
 # ---------------------------------------------------------------------------
@@ -73,6 +72,7 @@ class RunMetadata(BaseModel):
     agent_kwargs: dict[str, Any] | None = None
     pass_at_k: dict[int, float | None] | None = None
     resumed_at: str | None = None
+    network: dict[str, Any] | None = None
 
 
 class TaskImageResolutionRecord(BaseModel):
@@ -114,6 +114,7 @@ def build_run_metadata(
     start_time: str | None = None,
     agent_kwargs: dict[str, Any] | None = None,
     resumed_at: str | None = None,
+    network: dict[str, Any] | None = None,
 ) -> RunMetadata:
     strategy_value = (
         docker_image_strategy.value
@@ -147,6 +148,7 @@ def build_run_metadata(
         start_time=start_time,
         agent_kwargs=agent_kwargs,
         resumed_at=resumed_at,
+        network=network,
     )
 
 

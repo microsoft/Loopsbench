@@ -67,6 +67,13 @@ class BaseAgent(ABC):
         """
         raise NotImplementedError
 
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        """Optional installation hook, run under the environment network policy.
+
+        Existing custom agents need no new method. Agents that download tools
+        should move those operations here; perform_task runs under agent policy.
+        """
+
     def get_trajectory_paths(self) -> list[str]:
         """Return container paths to trajectory/log files that should be
         extracted before the container is destroyed.

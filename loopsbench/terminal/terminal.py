@@ -11,6 +11,7 @@ from loopsbench.terminal.docker_compose_manager import (
     DockerComposeManager,
     DockerImageResolution,
 )
+from loopsbench.terminal.network_policy import NetworkPlan
 from loopsbench.terminal.tmux_session import TmuxSession
 from loopsbench.utils.logger import logger
 
@@ -74,6 +75,7 @@ class Terminal:
             session_name=name,
             commands_path=self._commands_path,
             container_name=container_name,
+            network_controller=None if use_tester else self._compose_manager,
         )
 
     def copy_to_container(
@@ -104,6 +106,7 @@ def spin_up_terminal(
     no_rebuild: bool = False,
     cleanup: bool = False,
     task_dir: Path | None = None,
+    network: NetworkPlan | None = None,
 ) -> Generator[Terminal, None, None]:
     """Context manager: start compose stack -> yield Terminal -> tear down."""
     try:
@@ -120,6 +123,7 @@ def spin_up_terminal(
             logs_path=logs_path,
             agent_logs_path=agent_logs_path,
             task_dir=task_dir,
+            network=network,
         )
     except Exception as exc:
         raise TerminalStartupError(

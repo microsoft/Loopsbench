@@ -1,0 +1,23 @@
+# Adapted from Harbor for LoopsBench; see NOTICE and LICENSE.harbor.
+# addr, so_mark, and file.path must match bin/network-policy.
+services:
+  - name: transparent-egress
+    addr: ":12345"
+    bypass: allowlist
+    metadata:
+      so_mark: 114514
+    handler:
+      type: red
+      metadata:
+        sniffing: true
+        sniffing.timeout: 5s
+        sniffing.fallback: true
+    listener:
+      type: red
+
+bypasses:
+  - name: allowlist
+    whitelist: true
+    reload: 1s
+    file:
+      path: /opt/egress-sidecar/allowlist.txt

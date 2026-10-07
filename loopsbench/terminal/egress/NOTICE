@@ -1,0 +1,5 @@
+Egress sidecar adapted from harbor-framework/harbor, revision
+702b860fcede95592bc3eb85c671c40175996aa8 (Apache-2.0).
+Upstream: https://github.com/harbor-framework/harbor
+LoopsBench modifications: independent per-service policies, immediate policy
+transitions, denial of existing direct TCP connections, and offline DNS blocking.

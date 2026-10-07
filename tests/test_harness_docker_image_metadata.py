@@ -242,6 +242,8 @@ def test_run_trial_keeps_prestart_task_image_resolution_on_generic_startup_error
     )
 
     harness = Harness.__new__(Harness)
+    from loopsbench.terminal.network_policy import NetworkPlan
+    harness._network = NetworkPlan()
     harness._logger = logging.getLogger("test")
     harness._agent_name = AgentName.ORACLE
     harness._global_agent_timeout_sec = None
@@ -293,6 +295,8 @@ def test_run_trial_rewrites_task_image_resolution_from_terminal_startup_error_wi
     )
 
     harness = Harness.__new__(Harness)
+    from loopsbench.terminal.network_policy import NetworkPlan
+    harness._network = NetworkPlan()
     harness._logger = logging.getLogger("test")
     harness._agent_name = AgentName.ORACLE
     harness._global_agent_timeout_sec = None
@@ -348,6 +352,8 @@ def test_run_trial_rewrites_task_image_resolution_from_terminal_startup_error(
     )
 
     harness = Harness.__new__(Harness)
+    from loopsbench.terminal.network_policy import NetworkPlan
+    harness._network = NetworkPlan()
     harness._logger = logging.getLogger("test")
     harness._agent_name = AgentName.ORACLE
     harness._global_agent_timeout_sec = None
@@ -407,6 +413,8 @@ def test_execute_single_trial_maps_terminal_startup_error(
     (task_dir / "docker-compose.yaml").write_text("services: {}\n")
 
     harness = Harness.__new__(Harness)
+    from loopsbench.terminal.network_policy import NetworkPlan
+    harness._network = NetworkPlan()
     harness._logger = logging.getLogger("test")
     harness._output_path = tmp_path
     harness._run_id = "runs"

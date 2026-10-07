@@ -74,6 +74,7 @@ class CopilotAgent(BaseAgent):
                 shlex.quote(instruction),
                 "--allow-all",
                 "--no-remote",
+                "--deny-tool web_fetch --deny-tool web_search",
                 "--no-color",
                 "--output-format json",
                 f"--model {shlex.quote(self._model_name)}",
@@ -161,6 +162,9 @@ class CopilotAgent(BaseAgent):
             max_timeout_sec=10.0,
         )
 
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        self._ensure_copilot_cli(session)
+
     def perform_task(
         self,
         instruction: str,
@@ -168,7 +172,6 @@ class CopilotAgent(BaseAgent):
         logging_dir: Path | None = None,
         timeout_sec: float | None = None,
     ) -> AgentResult:
-        self._ensure_copilot_cli(session)
         session.send_keys(
             f"{self._build_copilot_command(instruction)} Enter",
             block=True,

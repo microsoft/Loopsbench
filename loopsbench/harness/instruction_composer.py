@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from loopsbench.agents.agent_name import AgentName
 
-
 _STRONG_AGENTS = {
     AgentName.CLAUDE_CODE,
     AgentName.QWEN_CODE,
@@ -27,6 +26,23 @@ Read every requirement under `/workspace/requirements/` (and any other
 explicit requirement list referenced by the task) and only finish once
 every single one is addressed. Cherry-picking or partial fixes will lead
 to failure.
+""".rstrip()
+
+_EXTERNAL_INFORMATION_POLICY = """
+
+## External information policy
+
+Solve the task using the supplied workspace, requirements, local documentation,
+and local execution results. Do not search the internet, fetch remote source
+code or documentation, or retrieve outside solutions. This applies to browser
+and search tools, remote MCP services, HTTP clients, shell commands, Git remotes,
+and programs you write yourself. Do not delegate these actions to another tool
+or model, and do not change networking or proxy settings to bypass this rule.
+
+The harness's configured model inference is allowed. Localhost services and
+local build/test tools are allowed. Dependency and agent installation belongs
+to the harness's preparation phase; report missing dependencies encountered
+during solving instead of downloading them yourself.
 """.rstrip()
 
 _OPTIONAL_PLANNING_ARTIFACT = """
@@ -177,7 +193,7 @@ valid JSON when the harness collects artifacts.
 
 
 def _benchmark_contract(agent_name: AgentName | None) -> str:
-    chunks = [_BENCHMARK_INTRO]
+    chunks = [_BENCHMARK_INTRO, _EXTERNAL_INFORMATION_POLICY]
     if agent_name != AgentName.CLAUDE_CODE:
         chunks.append(_OPTIONAL_PLANNING_ARTIFACT)
     chunks.append(_BENCHMARK_FROM_GIT)

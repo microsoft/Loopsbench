@@ -125,13 +125,7 @@ class MiniSweAgent(BaseAgent):
 
         return exports
 
-    def perform_task(
-        self,
-        instruction: str,
-        session: TmuxSession,
-        logging_dir: Path | None = None,
-        timeout_sec: float | None = None,
-    ) -> AgentResult:
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         # Provision mini-swe-agent inside the container. Two paths:
         #  1) If LOOPSBENCH_MINI_BUNDLE points at a tarball, copy + extract it
         #     (self-contained Python 3.11 + mini at /opt/python/bin/mini).
@@ -184,6 +178,14 @@ class MiniSweAgent(BaseAgent):
                 max_timeout_sec=10.0,
             )
 
+
+    def perform_task(
+        self,
+        instruction: str,
+        session: TmuxSession,
+        logging_dir: Path | None = None,
+        timeout_sec: float | None = None,
+    ) -> AgentResult:
         # Run the agent.
         # mini-swe-agent uses LiteLLM, which doesn't know the `copilot/`
         # prefix. We translate it to `openai/<m>` so LiteLLM hits the

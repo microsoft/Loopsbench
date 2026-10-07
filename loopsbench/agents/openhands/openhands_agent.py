@@ -10,7 +10,6 @@ from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
 from loopsbench.terminal.tmux_session import TmuxSession
 
-
 # Path to the bundled OpenHands source tree (co-located in this repo).
 _OPENHANDS_SRC = Path(__file__).parent.parent / "OpenHands"
 
@@ -215,13 +214,7 @@ class OpenHandsAgent(BaseAgent):
         container.exec_run("mkdir -p /opt/oh-src")
         container.put_archive("/opt/oh-src", buf.read())
 
-    def perform_task(
-        self,
-        instruction: str,
-        session: TmuxSession,
-        logging_dir: Path | None = None,
-        timeout_sec: float | None = None,
-    ) -> AgentResult:
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         # Capture working directory set by the task Dockerfile's WORKDIR.
         session.send_keys(
             "export LOOPSBENCH_WORKSPACE=$(pwd) Enter",
@@ -363,6 +356,14 @@ class OpenHandsAgent(BaseAgent):
             max_timeout_sec=10.0,
         )
 
+
+    def perform_task(
+        self,
+        instruction: str,
+        session: TmuxSession,
+        logging_dir: Path | None = None,
+        timeout_sec: float | None = None,
+    ) -> AgentResult:
         # Run OpenHands in headless mode.
         # -t: task description
         # --config-file: sets runtime = "local" and disables browser

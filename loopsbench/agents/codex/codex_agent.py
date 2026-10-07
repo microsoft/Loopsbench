@@ -22,7 +22,6 @@ from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
 from loopsbench.terminal.tmux_session import TmuxSession
 
-
 _CODEX_BIN_HOST = (
     Path(__file__).parent
     / "codex-rs"
@@ -195,13 +194,7 @@ class CodexAgent(BaseAgent):
                 max_timeout_sec=5.0,
             )
 
-    def perform_task(
-        self,
-        instruction: str,
-        session: TmuxSession,
-        logging_dir: Path | None = None,
-        timeout_sec: float | None = None,
-    ) -> AgentResult:
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         if not _CODEX_BIN_HOST.is_file():
             raise RuntimeError(
                 f"codex binary not found at {_CODEX_BIN_HOST}. "
@@ -239,6 +232,14 @@ class CodexAgent(BaseAgent):
                 max_timeout_sec=10.0,
             )
 
+
+    def perform_task(
+        self,
+        instruction: str,
+        session: TmuxSession,
+        logging_dir: Path | None = None,
+        timeout_sec: float | None = None,
+    ) -> AgentResult:
         # Run codex in non-interactive exec mode with goal-mode enabled.
         # --skip-git-repo-check because /workspace may not be a git repo at
         # task start. --json streams events to stdout (also captured to file).
@@ -248,6 +249,7 @@ class CodexAgent(BaseAgent):
             f"CODEX_HOME={_CODEX_HOME_CONTAINER} "
             f"{_CODEX_BIN_CONTAINER} exec "
             f"--enable goals "
+            '-c web_search="disabled" '
             f"--skip-git-repo-check "
             f"--dangerously-bypass-approvals-and-sandbox "
             f"-C /workspace "

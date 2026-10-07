@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -252,6 +251,10 @@ def create(
             rich_help_panel=HelpPanel.CONCURRENCY,
         ),
     ] = None,
+    allow_agent_hosts: Annotated[
+        list[str],
+        Option("--allow-agent-host", help="Allow a model hostname/IP/CIDR during solving (repeatable)."),
+    ] = [],
     agent_kwargs: Annotated[
         list[str],
         Option(
@@ -370,6 +373,17 @@ def create(
         "Oracle" if agent_resolved == AgentName.ORACLE else model_name_resolved
     )
 
+    from loopsbench.terminal.network_policy import NetworkPlan
+
+    network = (run_file.network if run_file else None) or NetworkPlan()
+    try:
+        network = NetworkPlan.model_validate({
+            **network.model_dump(),
+            "extra_allowed_hosts": [*network.extra_allowed_hosts, *allow_agent_hosts],
+        })
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     harness = Harness(
         dataset_path=dataset_path_resolved,
         output_path=rp["output_path"],
@@ -378,6 +392,7 @@ def create(
         agent_import_path=agent_import_resolved,
         model_name=model_str,
         agent_kwargs=processed,
+        network=network,
         no_rebuild=rp["no_rebuild"],
         docker_image_strategy=rp["docker_image_strategy"],
         docker_image_namespace=rp["docker_image_namespace"],

@@ -10,7 +10,6 @@ from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
 from loopsbench.terminal.tmux_session import TmuxSession
 
-
 # Path to the bundled SWE-agent source tree (co-located in this repo).
 _SWE_AGENT_SRC = Path(__file__).parent.parent / "swe-agent"
 
@@ -117,13 +116,7 @@ class SweAgent(BaseAgent):
         # Create the directory so the assertion passes.
         container.exec_run("mkdir -p /opt/swe-agent-src/trajectories")
 
-    def perform_task(
-        self,
-        instruction: str,
-        session: TmuxSession,
-        logging_dir: Path | None = None,
-        timeout_sec: float | None = None,
-    ) -> AgentResult:
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         # Capture working directory set by the task Dockerfile's WORKDIR.
         session.send_keys(
             "export LOOPSBENCH_WORKSPACE=$(pwd) Enter",
@@ -220,6 +213,14 @@ class SweAgent(BaseAgent):
                 max_timeout_sec=10.0,
             )
 
+
+    def perform_task(
+        self,
+        instruction: str,
+        session: TmuxSession,
+        logging_dir: Path | None = None,
+        timeout_sec: float | None = None,
+    ) -> AgentResult:
         # Write instruction to a file to avoid shell-quoting / length issues.
         session.send_keys(
             f"printf '%s' {shlex.quote(instruction)} > /tmp/loopsbench-instruction.txt Enter",
