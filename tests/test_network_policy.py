@@ -197,7 +197,7 @@ def test_real_legacy_task_phase_switch_and_separate_verifier(tmp_path):
     (data / "sentinel").write_text("legacy-mount")
     service = {"image": image, "entrypoint": ["sh", "-c"],
                "command": ["mkdir -p /workspace; printf '%s' '$$LITERAL' > /tmp/entrypoint-value; exec sleep infinity"],
-               "network_mode": "none", "working_dir": "/workspace", "volumes": ["./legacy-data:/legacy:ro"]}
+               "network_mode": "none", "working_dir": "/workspace", "volumes": ["${LOOPSBENCH_TASK_AGENT_LOGS_PATH}:/legacy:ro"]}
     compose = tmp_path / "compose.json"
     compose.write_text(json.dumps({"services": {
         "client": {**service, "container_name": project + "-client"},
@@ -210,6 +210,7 @@ def test_real_legacy_task_phase_switch_and_separate_verifier(tmp_path):
         client_container_name=project + "-client", client_image_name=image,
         tester_container_name=project + "-tester", tester_image_name=image,
         docker_compose_path=compose, no_rebuild=True, logs_path=tmp_path / "logs",
+        agent_logs_path=data,
         network=NetworkPlan.from_config(None, agent_kwargs={"base_url": "http://allowed.test:8765/v1", "api_key": "fake-model-key"}),
     )
 

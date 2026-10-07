@@ -4,8 +4,10 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 
+from loopsbench import task_contribution_validation
 from loopsbench.task_contribution_validation import validate_task_contribution
 
 
@@ -144,6 +146,87 @@ def test_validate_task_contribution_accepts_valid_task(tmp_path: Path) -> None:
 
     assert report.ok is True
     assert report.issues == []
+
+
+@pytest.mark.parametrize(
+    ("service_patch", "expected_code"),
+    [
+        ({"privileged": True}, "compose_privileged"),
+        ({"pid": "host"}, "compose_pid_namespace"),
+        ({"network_mode": "host"}, "compose_network_mode_host"),
+        ({"devices": ["/dev/kvm:/dev/kvm"]}, "compose_devices"),
+        ({"cap_add": ["SYS_ADMIN"]}, "compose_dangerous_capability"),
+        (
+            {"volumes": ["/var/run/docker.sock:/var/run/docker.sock"]},
+            "compose_docker_socket_mount",
+        ),
+        ({"volumes": ["/etc:/host/etc:ro"]}, "compose_host_bind_mount"),
+        (
+            {
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": "./host-data",
+                        "target": "/host-data",
+                    }
+                ]
+            },
+            "compose_host_bind_mount",
+        ),
+    ],
+)
+def test_validate_task_contribution_rejects_unsafe_compose_service_config(
+    tmp_path: Path,
+    service_patch: dict[str, object],
+    expected_code: str,
+) -> None:
+    task_dir = _write_valid_task(tmp_path)
+    compose_path = task_dir / "docker-compose.yaml"
+    payload = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    payload["services"]["client"].update(service_patch)
+    _write_text(compose_path, yaml.safe_dump(payload, sort_keys=False))
+
+    report = validate_task_contribution(task_dir)
+
+    assert report.ok is False
+    assert expected_code in {issue.code for issue in report.issues}
+
+
+def test_validate_task_contribution_allows_checked_in_task_capabilities() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    task_dir = repo_root / "tasks" / "task_tcp_course_stack"
+
+    report = validate_task_contribution(task_dir)
+
+    assert report.ok is True
+    assert report.issues == []
+
+
+def test_run_task_contribution_checks_skips_commands_after_static_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_dir = _write_valid_task(tmp_path)
+    compose_path = task_dir / "docker-compose.yaml"
+    payload = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    payload["services"]["client"]["privileged"] = True
+    _write_text(compose_path, yaml.safe_dump(payload, sort_keys=False))
+
+    def _fail_run_command(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("dynamic validation command should not run")
+
+    monkeypatch.setattr(task_contribution_validation, "run_command", _fail_run_command)
+
+    report = task_contribution_validation.run_task_contribution_checks(
+        task_dir,
+        run_tasks_validate=True,
+        run_oracle=True,
+        oracle_output_root=tmp_path / "oracle-output",
+    )
+
+    assert report.ok is False
+    assert report.commands == []
+    assert "compose_privileged" in {issue.code for issue in report.issues}
 
 
 def test_validate_task_contribution_publish_mode_requires_provenance(

@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from loopsbench.handlers.trial_handler import Task, TaskDifficulty
+from loopsbench.utils.compose_security import validate_compose_security
 
 REQUIRED_CONTRIBUTION_FILES = (
     "task.yaml",
@@ -166,7 +167,7 @@ def _validate_task_yaml(
     report: TaskContributionReport,
     *,
     require_provenance: bool = False,
-) -> None:
+) -> Path | None:
     task_yaml = task_dir / "task.yaml"
     try:
         raw_payload = yaml.safe_load(task_yaml.read_text(encoding="utf-8")) or {}
@@ -177,7 +178,7 @@ def _validate_task_yaml(
             f"task.yaml failed schema validation: {exc}",
             path=task_yaml,
         )
-        return
+        return None
 
     if not task.instruction.strip():
         report.add_issue(
@@ -207,17 +208,28 @@ def _validate_task_yaml(
         )
 
     compose_file = Path(task.docker.compose_file)
+    compose_path: Path | None = None
     if compose_file.is_absolute() or compose_file.name == "":
         report.add_issue(
             "invalid_compose_path",
             "task.yaml docker.compose_file must be a relative file path.",
             path=task_yaml,
         )
-    elif _resolve_within(task_dir, str(compose_file)) is None:
+    else:
+        compose_path = _resolve_within(task_dir, str(compose_file))
+    if compose_path is None and not (
+        compose_file.is_absolute() or compose_file.name == ""
+    ):
         report.add_issue(
             "compose_path_traversal",
             "task.yaml docker.compose_file must stay inside the task directory.",
             path=task_yaml,
+        )
+    elif compose_path is not None and not compose_path.is_file():
+        report.add_issue(
+            "missing_compose_file",
+            f"Missing docker compose file `{task.docker.compose_file}`.",
+            path=compose_path,
         )
 
     missing_fields = missing_provenance_fields(raw_payload)
@@ -235,6 +247,16 @@ def _validate_task_yaml(
                 f"task.yaml includes provenance metadata, so `{key}` must also be set.",
                 path=task_yaml,
             )
+    return compose_path
+
+
+def _validate_compose_file(
+    compose_path: Path | None, report: TaskContributionReport
+) -> None:
+    if compose_path is None or not compose_path.is_file():
+        return
+    for issue in validate_compose_security(compose_path):
+        report.add_issue(issue.code, issue.message, path=issue.path)
 
 
 def _validate_unit_dag(task_dir: Path, report: TaskContributionReport) -> list[str]:
@@ -686,9 +708,10 @@ def validate_task_contribution(
     if any(issue.code == "missing_task_dir" for issue in report.issues):
         return report
 
-    _validate_task_yaml(
+    compose_path = _validate_task_yaml(
         resolved_task_dir, report, require_provenance=require_provenance
     )
+    _validate_compose_file(compose_path, report)
     unit_ids = _validate_unit_dag(resolved_task_dir, report)
     _validate_module_dag(resolved_task_dir, report)
     requirement_stems = _validate_requirements(resolved_task_dir, unit_ids, report)
@@ -721,12 +744,12 @@ def run_task_contribution_checks(
     oracle_output_root: Path | None = None,
     require_provenance: bool = False,
 ) -> TaskContributionReport:
-    report = validate_task_contribution(
-        task_dir, require_provenance=require_provenance
-    )
+    report = validate_task_contribution(task_dir, require_provenance=require_provenance)
     repo_root = Path(__file__).resolve().parents[1]
     task_id = task_dir.resolve().name
     tasks_root = task_dir.resolve().parent
+    if report.issues:
+        return report
 
     if run_tasks_validate:
         report.add_command(

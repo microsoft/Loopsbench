@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from loopsbench.task_images.strategy import DockerImageStrategy
 from loopsbench.terminal import docker_compose_manager
+from loopsbench.terminal.network_policy import NetworkPlan
 
 
 class _DummyDockerClient:
@@ -171,6 +172,54 @@ def test_start_pulls_remote_image_then_records_resolution_and_uses_no_build(
     )
 
 
+@pytest.mark.parametrize("network", [None, NetworkPlan()])
+def test_start_rejects_unsafe_task_compose_before_docker_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    network: NetworkPlan | None,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yaml"
+    compose_file.write_text(
+        "\n".join(
+            [
+                "services:",
+                "  client:",
+                "    image: loopsbench__task_demo__client",
+                "    privileged: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        docker_compose_manager,
+        "_get_docker_module",
+        lambda: _DummyDockerModule,
+    )
+    manager = docker_compose_manager.DockerComposeManager(
+        client_container_name="task-client",
+        client_image_name="loopsbench__task_demo__client",
+        docker_compose_path=compose_file,
+        docker_image_strategy=DockerImageStrategy.LOCAL_BUILD,
+        network=network,
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "_run_compose",
+        lambda _command: pytest.fail("compose must not run for unsafe config"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run_docker",
+        lambda _command: pytest.fail("docker must not run for unsafe config"),
+    )
+
+    with pytest.raises(RuntimeError, match="privileged"):
+        manager.start()
+
+
 def test_start_builds_in_local_build_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -192,7 +241,13 @@ def test_start_builds_in_local_build_mode(
         ("compose", ["build"]),
         (
             "docker",
-            ["image", "inspect", "--format", "{{json .}}", "loopsbench__task_demo__client"],
+            [
+                "image",
+                "inspect",
+                "--format",
+                "{{json .}}",
+                "loopsbench__task_demo__client",
+            ],
         ),
         ("compose", ["up", "-d"]),
     ]
@@ -281,7 +336,9 @@ def test_start_wraps_remote_pull_failure_with_image_ref(
 
     monkeypatch.setattr(manager, "_run_docker", _fail_pull)
 
-    with pytest.raises(RuntimeError, match="exampleorg/loopsbench-task-compiler:git-ab12cd3"):
+    with pytest.raises(
+        RuntimeError, match="exampleorg/loopsbench-task-compiler:git-ab12cd3"
+    ):
         manager.start()
 
 

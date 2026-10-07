@@ -12,6 +12,7 @@ from rich.table import Table
 from typer import Option, Typer
 
 from loopsbench.handlers.trial_handler import Task
+from loopsbench.utils.compose_security import validate_compose_security
 
 tasks_app = Typer(no_args_is_help=True)
 console = Console()
@@ -159,13 +160,25 @@ def validate(
                     issues.append("Missing parser_name in task.yaml")
 
                 compose_file = Path(task.docker.compose_file)
-                compose_path = td / compose_file
                 if compose_file.is_absolute() or compose_file.name == "":
                     issues.append("docker.compose_file must be a relative path")
-                elif not compose_path.exists():
-                    issues.append(
-                        f"Missing docker compose file: {task.docker.compose_file}"
-                    )
+                else:
+                    compose_path = (td / compose_file).resolve()
+                    task_root = td.resolve()
+                    if (
+                        task_root not in compose_path.parents
+                        and compose_path != task_root
+                    ):
+                        issues.append(
+                            "docker.compose_file must stay within the task directory"
+                        )
+                    elif not compose_path.exists():
+                        issues.append(
+                            f"Missing docker compose file: {task.docker.compose_file}"
+                        )
+                    else:
+                        for security_issue in validate_compose_security(compose_path):
+                            issues.append(security_issue.message)
             except Exception as exc:
                 issues.append(f"Invalid task.yaml: {exc}")
 

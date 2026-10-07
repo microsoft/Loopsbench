@@ -21,6 +21,10 @@ from loopsbench.terminal.network_policy import (
     controlled_compose,
 )
 from loopsbench.utils.compose_env import compose_runtime_env
+from loopsbench.utils.compose_security import (
+    format_compose_security_issues,
+    validate_compose_security,
+)
 from loopsbench.utils.env_model import EnvModel
 from loopsbench.utils.logger import logger
 
@@ -45,6 +49,7 @@ def _get_docker_module() -> Any:
 # ---------------------------------------------------------------------------
 # Environment variable model (passed to docker compose)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DockerComposeEnvVars(EnvModel):
@@ -93,6 +98,7 @@ def docker_command(args: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 # DockerComposeManager
 # ---------------------------------------------------------------------------
+
 
 class DockerComposeManager:
     """Manages the lifecycle of Docker Compose services for a single task."""
@@ -166,20 +172,14 @@ class DockerComposeManager:
             container_agent_logs_path=self.CONTAINER_AGENT_LOGS_PATH,
             test_dir=str(self.CONTAINER_TEST_DIR),
             task_logs_path=(
-                str(self._logs_path.absolute())
-                if self._logs_path is not None
-                else None
+                str(self._logs_path.absolute()) if self._logs_path is not None else None
             ),
             task_agent_logs_path=(
                 str(self._agent_logs_path.absolute())
                 if self._agent_logs_path is not None
                 else None
             ),
-            task_dir=(
-                str(Path(task_dir).resolve())
-                if task_dir is not None
-                else None
-            ),
+            task_dir=(str(Path(task_dir).resolve()) if task_dir is not None else None),
         ).to_env_dict(include_os_env=False)
         self.env = {**docker_env(), **compose_runtime_env(compose_env)}
 
@@ -188,29 +188,32 @@ class DockerComposeManager:
     def _compose_cmd(self, command: list[str]) -> list[str]:
         compose_file_args: list[str] = []
         for compose_file in self._compose_files:
-            compose_file_args.extend(
-                ["-f", str(compose_file.resolve().absolute())]
-            )
-        return docker_command([
-            "compose",
-            "-p", self._client_container_name.lower(),
-            *compose_file_args,
-            *command,
-        ])
+            compose_file_args.extend(["-f", str(compose_file.resolve().absolute())])
+        return docker_command(
+            [
+                "compose",
+                "-p",
+                self._client_container_name.lower(),
+                *compose_file_args,
+                *command,
+            ]
+        )
 
     def _run_compose(self, command: list[str]) -> subprocess.CompletedProcess:
         full = self._compose_cmd(command)
         self._logger.debug(f"Running: {' '.join(full)}")
         try:
             return subprocess.run(
-                full, env=self.env, check=True,
-                capture_output=True, text=True,
+                full,
+                env=self.env,
+                check=True,
+                capture_output=True,
+                text=True,
             )
         except subprocess.CalledProcessError as exc:
             tail = 4000
             self._logger.warning(
-                f"Docker compose failed (exit {exc.returncode}): "
-                f"{' '.join(full)}"
+                f"Docker compose failed (exit {exc.returncode}): {' '.join(full)}"
             )
             if exc.stdout:
                 self._logger.warning(
@@ -224,7 +227,9 @@ class DockerComposeManager:
 
     # -- lifecycle --
 
-    def _service_container(self, service: str, retries: int = 60, delay_sec: float = 0.5) -> Container | None:
+    def _service_container(
+        self, service: str, retries: int = 60, delay_sec: float = 0.5
+    ) -> Container | None:
         for _ in range(retries):
             result = subprocess.run(
                 self._compose_cmd(["ps", "-q", service]),
@@ -251,6 +256,16 @@ class DockerComposeManager:
             capture_output=True,
             text=True,
         )
+
+    def _validate_task_compose_security(self) -> None:
+        if not self._compose_files:
+            return
+        issues = validate_compose_security(self._compose_files[0])
+        if issues:
+            raise RuntimeError(
+                "Unsafe Docker Compose task configuration:\n"
+                f"{format_compose_security_issues(issues)}"
+            )
 
     def _pull_remote_image(self) -> None:
         try:
@@ -304,13 +319,15 @@ class DockerComposeManager:
 
     def _capture_image_resolution(self) -> None:
         try:
-            result = self._run_docker([
-                "image",
-                "inspect",
-                "--format",
-                "{{json .}}",
-                self._client_image_name,
-            ])
+            result = self._run_docker(
+                [
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    self._client_image_name,
+                ]
+            )
             payload = json.loads(result.stdout or "{}")
             if not isinstance(payload, Mapping):
                 raise ValueError("docker image inspect returned a non-object payload")
@@ -336,6 +353,8 @@ class DockerComposeManager:
             )
 
     def start(self) -> Container:
+        # Validate task-owned input before adding trusted network controllers.
+        self._validate_task_compose_security()
         self._configure_network()
         if self._docker_image_strategy == DockerImageStrategy.REMOTE:
             self._pull_remote_image()
@@ -550,6 +569,7 @@ class DockerComposeManager:
 # ---------------------------------------------------------------------------
 # Context manager
 # ---------------------------------------------------------------------------
+
 
 @contextmanager
 def spin_up_container(
