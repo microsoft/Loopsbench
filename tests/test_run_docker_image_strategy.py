@@ -25,7 +25,7 @@ from loopsbench.task_images.strategy import (
 )
 
 
-def _resolve(**overrides):
+def _resolve(file_cfg=None, **overrides):
     base = dict(
         dataset_path=None,
         output_path=None,
@@ -51,7 +51,7 @@ def _resolve(**overrides):
         docker_image_tag=None,
     )
     base.update(overrides)
-    return resolve_run_params(None, **base)
+    return resolve_run_params(file_cfg, **base)
 
 
 def test_strategy_helpers_normalize_and_build_image_refs() -> None:
@@ -66,16 +66,42 @@ def test_strategy_helpers_normalize_and_build_image_refs() -> None:
     )
 
 
-def test_resolve_run_params_defaults_remote_tag_to_latest() -> None:
-    rp = _resolve()
-    assert rp["docker_image_strategy"] == DockerImageStrategy.REMOTE
+@pytest.mark.parametrize("file_cfg", [None, LoopsBenchRunFileConfig()])
+def test_resolve_run_params_defaults_to_local_build(file_cfg) -> None:
+    rp = _resolve(file_cfg)
+    assert rp["docker_image_strategy"] == DockerImageStrategy.LOCAL_BUILD
     assert rp["docker_image_namespace"] is None
+    assert rp["docker_image_tag"] is None
+    assert rp["docker_image_tag_defaulted"] is False
+    image = resolve_task_docker_image(
+        task_id="task_hadoop_seg05",
+        strategy=rp["docker_image_strategy"],
+        docker_image_namespace=rp["docker_image_namespace"],
+        docker_image_tag=rp["docker_image_tag"],
+    )
+    assert image.client_image_ref == "loopsbench__task_hadoop_seg05__client"
+    assert image.build_required is True
+    assert image.pull_required is False
+
+
+@pytest.mark.parametrize(
+    ("file_cfg", "overrides"),
+    [
+        (None, {"docker_image_strategy": DockerImageStrategy.REMOTE}),
+        (LoopsBenchRunFileConfig(docker_image_strategy="remote"), {}),
+    ],
+)
+def test_explicit_remote_defaults_to_loopsbench_latest(file_cfg, overrides) -> None:
+    rp = _resolve(file_cfg, **overrides)
+    assert rp["docker_image_strategy"] == DockerImageStrategy.REMOTE
+    assert rp["docker_image_namespace"] == "loopsbench"
     assert rp["docker_image_tag"] == DEFAULT_REMOTE_DOCKER_IMAGE_TAG
     assert rp["docker_image_tag_defaulted"] is True
 
 
 def test_resolve_run_params_preserves_explicit_remote_tag() -> None:
     rp = _resolve(
+        docker_image_strategy=DockerImageStrategy.REMOTE,
         docker_image_namespace="exampleorg",
         docker_image_tag="git-ab12cd3",
     )
@@ -87,6 +113,7 @@ def test_resolve_run_params_preserves_explicit_remote_tag() -> None:
 
 def test_resolve_run_params_empty_remote_tag_defaults_to_latest() -> None:
     rp = _resolve(
+        docker_image_strategy=DockerImageStrategy.REMOTE,
         docker_image_namespace="exampleorg",
         docker_image_tag="",
     )
@@ -124,6 +151,24 @@ def test_run_file_accepts_docker_image_fields() -> None:
     assert cfg.docker_image_tag == "git-ab12cd3"
 
 
+def test_remote_run_file_coordinates_and_cli_overrides() -> None:
+    cfg = LoopsBenchRunFileConfig(
+        docker_image_strategy="remote",
+        docker_image_namespace="customorg",
+        docker_image_tag="release",
+    )
+    rp = _resolve(cfg)
+    assert rp["docker_image_strategy"] == DockerImageStrategy.REMOTE
+    assert rp["docker_image_namespace"] == "customorg"
+    assert rp["docker_image_tag"] == "release"
+    rp = _resolve(cfg, docker_image_namespace="loopsbench", docker_image_tag="latest")
+    assert rp["docker_image_namespace"] == "loopsbench"
+    assert rp["docker_image_tag"] == "latest"
+    assert rp["docker_image_tag_defaulted"] is False
+    rp = _resolve(cfg, docker_image_strategy=DockerImageStrategy.LOCAL_BUILD)
+    assert rp["docker_image_strategy"] == DockerImageStrategy.LOCAL_BUILD
+
+
 def test_resolve_run_params_rejects_mixed_deprecated_and_explicit_strategy() -> None:
     with pytest.raises(ValueError, match="Cannot combine deprecated no_rebuild"):
         _resolve(
@@ -132,17 +177,17 @@ def test_resolve_run_params_rejects_mixed_deprecated_and_explicit_strategy() -> 
         )
 
 
-def test_resolve_docker_image_strategy_defaults_to_remote() -> None:
+def test_resolve_docker_image_strategy_defaults_to_local_build() -> None:
     assert (
         resolve_docker_image_strategy(
             no_rebuild=None,
             explicit_strategy=None,
         )
-        == DockerImageStrategy.REMOTE
+        == DockerImageStrategy.LOCAL_BUILD
     )
 
 
-def test_validate_remote_strategy_requires_namespace_but_not_tag() -> None:
+def test_validate_remote_coordinates_require_resolved_namespace_but_not_tag() -> None:
     with pytest.raises(
         ValueError,
         match="docker_image_namespace is required when docker_image_strategy=remote",
@@ -177,6 +222,19 @@ def test_validate_remote_strategy_requires_namespace_but_not_tag() -> None:
         docker_image_namespace="exampleorg",
         docker_image_tag="git-ab12cd3",
     )
+
+
+@pytest.mark.parametrize("namespace", [None, ""])
+def test_resolve_task_docker_image_defaults_to_loopsbench(namespace) -> None:
+    resolved = resolve_task_docker_image(
+        task_id="task_NodeBB_seg05",
+        strategy=DockerImageStrategy.REMOTE,
+        docker_image_namespace=namespace,
+        docker_image_tag=None,
+    )
+    assert resolved.client_image_ref == "loopsbench/loopsbench-task-nodebb-seg05:latest"
+    assert resolved.pull_required is True
+    assert resolved.build_required is False
 
 
 def test_resolve_task_docker_image_defaults_remote_tag_to_latest() -> None:

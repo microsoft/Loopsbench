@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 
+DEFAULT_REMOTE_DOCKER_IMAGE_NAMESPACE = "loopsbench"
 DEFAULT_REMOTE_DOCKER_IMAGE_TAG = "latest"
 
 
@@ -36,7 +37,7 @@ def resolve_docker_image_strategy(
         return explicit_strategy
     if no_rebuild:
         return DockerImageStrategy.LOCAL_EXISTING
-    return DockerImageStrategy.REMOTE
+    return DockerImageStrategy.LOCAL_BUILD
 
 
 def validate_remote_docker_image_coordinates(
@@ -70,6 +71,10 @@ def remote_client_image_ref(namespace: str, task_id: str, tag: str) -> str:
     return f"{task_image_repo(namespace, task_id)}:{tag}"
 
 
+def effective_remote_docker_image_namespace(namespace: str | None) -> str:
+    return DEFAULT_REMOTE_DOCKER_IMAGE_NAMESPACE if namespace in (None, "") else namespace
+
+
 def effective_remote_docker_image_tag(tag: str | None) -> str:
     return DEFAULT_REMOTE_DOCKER_IMAGE_TAG if tag in (None, "") else tag
 
@@ -82,16 +87,19 @@ def resolve_task_docker_image(
     docker_image_tag: str | None,
 ) -> ResolvedDockerImageConfig:
     if strategy == DockerImageStrategy.REMOTE:
+        effective_namespace = effective_remote_docker_image_namespace(
+            docker_image_namespace
+        )
         validate_remote_docker_image_coordinates(
             strategy=strategy,
-            docker_image_namespace=docker_image_namespace,
+            docker_image_namespace=effective_namespace,
             docker_image_tag=docker_image_tag,
         )
         effective_tag = effective_remote_docker_image_tag(docker_image_tag)
         return ResolvedDockerImageConfig(
             strategy=strategy,
             client_image_ref=remote_client_image_ref(
-                docker_image_namespace or "",
+                effective_namespace,
                 task_id,
                 effective_tag,
             ),

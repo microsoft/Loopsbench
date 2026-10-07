@@ -94,6 +94,41 @@ def test_write_task_image_resolution_records_requested_and_resolved_fields(
     assert written == record
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "strategy", "namespace", "tag"),
+    [
+        ({}, DockerImageStrategy.LOCAL_BUILD, None, None),
+        ({"docker_image_strategy": "remote"}, DockerImageStrategy.REMOTE, "loopsbench", "latest"),
+    ],
+)
+def test_direct_harness_image_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict,
+    strategy: DockerImageStrategy,
+    namespace: str | None,
+    tag: str | None,
+) -> None:
+    monkeypatch.setattr(
+        Harness,
+        "_init_dataset",
+        lambda self: setattr(self, "_dataset", _StubDataset()),
+    )
+    monkeypatch.setattr(Harness, "_init_agent_class", lambda self: None)
+    monkeypatch.setattr(Harness, "_init_logger", lambda self: None)
+
+    harness = Harness(
+        output_path=tmp_path / "runs",
+        run_id="image-defaults",
+        agent_name=AgentName.ORACLE,
+        **kwargs,
+    )
+    assert harness._docker_image_strategy == strategy
+    assert harness._docker_image_namespace == namespace
+    assert harness._docker_image_tag == tag
+    assert harness._docker_image_tag_defaulted is (strategy == DockerImageStrategy.REMOTE)
+
+
 def test_direct_harness_remote_empty_tag_forces_defaulted_true(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

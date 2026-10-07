@@ -169,7 +169,10 @@ def create(
         DockerImageStrategy | None,
         Option(
             "--docker-image-strategy",
-            help="Docker image strategy: remote, local-build, or local-existing.",
+            help=(
+                "Docker image strategy: local-build (default, recommended), "
+                "remote, or local-existing."
+            ),
             rich_help_panel=HelpPanel.BUILD,
         ),
     ] = None,
@@ -177,7 +180,7 @@ def create(
         str | None,
         Option(
             "--docker-image-namespace",
-            help="Docker Hub namespace for remote task images.",
+            help="Docker Hub namespace for remote task images (default: loopsbench).",
             rich_help_panel=HelpPanel.BUILD,
         ),
     ] = None,

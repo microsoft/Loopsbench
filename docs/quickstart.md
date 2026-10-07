@@ -57,7 +57,7 @@ loopsbench tasks validate --tasks-dir tasks
 
 ## Run the Oracle Baseline
 
-The Oracle agent applies the task solution and is useful for validating task packaging:
+The Oracle agent applies the task solution and is useful for validating task packaging. `local-build` is the default and recommended image strategy for benchmark runs; the explicit flag below can be omitted:
 
 ```bash
 loopsbench run \
@@ -92,7 +92,7 @@ loopsbench run \
 
 ## Use Remote Task Images
 
-If the task images are already published to a registry, switch to `remote` instead of `local-build`. The code requires `--docker-image-namespace` when `--docker-image-strategy remote` is used; the current public Docker Hub namespace is `dolischwer`, and `--docker-image-tag` defaults to `latest`.
+For tasks with published images, explicitly select `remote`. It defaults to the Docker Hub namespace `loopsbench` and tag `latest`, for example `loopsbench/loopsbench-task-tcp-course-stack:latest`. Use `--docker-image-namespace` or `--docker-image-tag` to override these defaults.
 
 ```bash
 loopsbench run \
@@ -102,7 +102,7 @@ loopsbench run \
   --model provider/model-name \
   --model-config model-env.yaml \
   --docker-image-strategy remote \
-  --docker-image-namespace dolischwer \
+  --docker-image-namespace loopsbench \
   --docker-image-tag latest
 ```
 

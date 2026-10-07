@@ -11,6 +11,7 @@ from loopsbench.file_config.io import merge_agent_kwargs
 from loopsbench.file_config.run_file import LoopsBenchRunFileConfig
 from loopsbench.task_images.strategy import (
     DockerImageStrategy,
+    effective_remote_docker_image_namespace,
     effective_remote_docker_image_tag,
     resolve_docker_image_strategy,
 )
@@ -82,6 +83,11 @@ def resolve_run_params(
             None,
         ),
     )
+    docker_image_namespace_eff = _pick(
+        docker_image_namespace,
+        f.docker_image_namespace if f else None,
+        None,
+    )
     docker_image_tag_eff = _pick(
         docker_image_tag,
         f.docker_image_tag if f else None,
@@ -89,6 +95,9 @@ def resolve_run_params(
     )
     docker_image_tag_defaulted = False
     if docker_image_strategy_eff == DockerImageStrategy.REMOTE:
+        docker_image_namespace_eff = effective_remote_docker_image_namespace(
+            docker_image_namespace_eff
+        )
         docker_image_tag_defaulted = docker_image_tag_eff in (None, "")
         docker_image_tag_eff = effective_remote_docker_image_tag(docker_image_tag_eff)
 
@@ -103,11 +112,7 @@ def resolve_run_params(
         ),
         "no_rebuild": no_rebuild_eff,
         "docker_image_strategy": docker_image_strategy_eff,
-        "docker_image_namespace": _pick(
-            docker_image_namespace,
-            f.docker_image_namespace if f else None,
-            None,
-        ),
+        "docker_image_namespace": docker_image_namespace_eff,
         "docker_image_tag": docker_image_tag_eff,
         "docker_image_tag_defaulted": docker_image_tag_defaulted,
         "cleanup": _pick(cleanup, f.cleanup if f else None, True),

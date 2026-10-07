@@ -40,15 +40,15 @@ loopsbench run \
 
 ## Docker Image Strategies
 
-LoopsBench supports three strategies:
+LoopsBench defaults to `local-build`, the recommended strategy for benchmark runs. CLI options, YAML run configurations, and the Python `Harness` API use the same default. Three strategies are available:
 
 | Strategy | Behavior | Typical use |
 | --- | --- | --- |
-| `remote` | Pull prebuilt task images from a registry. | Shared evaluation runs and CI. |
-| `local-build` | Build images locally from each task's `docker-compose.yaml`. | Task authoring and local validation. |
+| `local-build` (default, recommended) | Build images locally from each task's `docker-compose.yaml`. | Benchmark runs, task authoring, and validation. |
+| `remote` | Pull prebuilt task images from a registry. | Optional use of published task images. |
 | `local-existing` | Reuse images already present on the machine. | Debugging or offline reruns. |
 
-Remote images require an explicit namespace. The current public Docker Hub namespace is `dolischwer`. If you omit `--docker-image-tag`, the code defaults it to `latest`:
+When explicitly selected, `remote` defaults to the Docker Hub namespace `loopsbench` and tag `latest`. Task IDs are lowercased and underscores become hyphens: `task_tcp_course_stack` uses `loopsbench/loopsbench-task-tcp-course-stack:latest`. The namespace and tag can be overridden. Use this mode for tasks whose images have been published:
 
 ```bash
 loopsbench run \
@@ -57,7 +57,7 @@ loopsbench run \
   --agent codex \
   --model provider/model-name \
   --docker-image-strategy remote \
-  --docker-image-namespace dolischwer \
+  --docker-image-namespace loopsbench \
   --docker-image-tag latest
 ```
 

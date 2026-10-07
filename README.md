@@ -43,7 +43,7 @@ Key properties:
 
 - **Long-horizon structure**: tasks are decomposed into modules and separately testable units.
 - **Terminal realism**: agents work inside task containers with command-line tools, logs, and test scripts.
-- **Reproducible execution**: Docker-backed tasks support remote images, local builds, or existing local images.
+- **Reproducible execution**: Docker-backed tasks use local builds by default, with optional remote or existing local images.
 - **Agent breadth**: built-in adapters include Oracle, Mini SWE-agent, SWE-agent, OpenHands, Claude Code, Cursor, Codex, Qwen Code, and Copilot.
 - **Contribution safety**: untrusted task PRs are validated by trusted workflow code before merge.
 
@@ -51,7 +51,7 @@ Key properties:
 
 - The [LoopsBench paper](https://arxiv.org/abs/2608.00267) is now available on arXiv.
 - GitHub-native task proposals and PR validation are now included in this repository.
-- `loopsbench run` supports remote, local-build, and local-existing Docker image strategies.
+- `loopsbench run` defaults to the recommended `local-build` strategy and also supports `remote` and `local-existing`.
 - Task publishing emits deterministic bundles and SHA-256 checksums from trusted default-branch workflows.
 - API documentation is generated automatically and deployed to [loopsbench.ai](https://loopsbench.ai).
 
@@ -108,7 +108,7 @@ Validate task metadata and required files:
 loopsbench tasks validate --tasks-dir tasks
 ```
 
-Run the example task with the Oracle agent and a local Docker build:
+Run the example task with the Oracle agent and a local Docker build. `local-build` is the default and recommended strategy; the explicit flag below can be omitted:
 
 ```bash
 loopsbench run \
@@ -118,7 +118,7 @@ loopsbench run \
   --docker-image-strategy local-build
 ```
 
-Or pull prebuilt remote task images instead. The code requires `--docker-image-namespace` for `remote`; the current public Docker Hub namespace is `dolischwer`, and `--docker-image-tag` defaults to `latest`. Use the same `model-env.yaml` pattern described in Configuration:
+For tasks with published images, you can explicitly select `remote`. Its default Docker Hub namespace is `loopsbench`, and its default tag is `latest`, producing names such as `loopsbench/loopsbench-task-tcp-course-stack:latest`. Both defaults can be overridden with `--docker-image-namespace` and `--docker-image-tag`. Use the same `model-env.yaml` pattern described in Configuration:
 
 ```bash
 loopsbench run \
@@ -128,7 +128,7 @@ loopsbench run \
   --model provider/model-name \
   --model-config model-env.yaml \
   --docker-image-strategy remote \
-  --docker-image-namespace dolischwer \
+  --docker-image-namespace loopsbench \
   --docker-image-tag latest
 ```
 

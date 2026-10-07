@@ -55,6 +55,7 @@ from loopsbench.parsers.base_parser import ParseContext, UnitTestStatus
 from loopsbench.parsers.parser_factory import ParserFactory, ResultFormat
 from loopsbench.task_images.strategy import (
     DockerImageStrategy,
+    effective_remote_docker_image_namespace,
     effective_remote_docker_image_tag,
     resolve_task_docker_image,
     validate_remote_docker_image_coordinates,
@@ -94,7 +95,7 @@ class Harness:
         model_name: str | None = None,
         agent_kwargs: dict[str, Any] | None = None,
         no_rebuild: bool = False,
-        docker_image_strategy: DockerImageStrategy | str = DockerImageStrategy.REMOTE,
+        docker_image_strategy: DockerImageStrategy | str = DockerImageStrategy.LOCAL_BUILD,
         docker_image_namespace: str | None = None,
         docker_image_tag: str | None = None,
         docker_image_tag_defaulted: bool | None = None,
@@ -130,6 +131,10 @@ class Harness:
         self._no_rebuild = no_rebuild
         self._docker_image_strategy = DockerImageStrategy(docker_image_strategy)
         self._docker_image_namespace = docker_image_namespace
+        if self._docker_image_strategy == DockerImageStrategy.REMOTE:
+            self._docker_image_namespace = effective_remote_docker_image_namespace(
+                docker_image_namespace
+            )
         incoming_docker_image_tag = docker_image_tag
         incoming_tag_omitted = incoming_docker_image_tag in (None, "")
         if (
