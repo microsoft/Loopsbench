@@ -3,6 +3,14 @@ from __future__ import annotations
 
 import re
 
+ECOSYSTEMS = ("python", "go", "npm", "cargo", "maven", "nuget", "apt")
+
+
+class GatewayError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
 
 def canonical_package(ecosystem: str, value: str) -> str:
     if ecosystem == "python":
@@ -15,6 +23,20 @@ def canonical_package(ecosystem: str, value: str) -> str:
         if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~/-]*", value)
                 or any(part in {"", ".", ".."} for part in value.split("/"))):
             raise ValueError("invalid Go module path")
+        return value
+    if ecosystem == "npm":
+        if not re.fullmatch(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*", value.lower()):
+            raise ValueError("invalid npm package name")
+        return value.lower()
+    if ecosystem in {"cargo", "nuget", "apt"}:
+        patterns = {"cargo": r"[A-Za-z0-9][A-Za-z0-9_-]*", "nuget": r"[A-Za-z0-9][A-Za-z0-9_.-]*",
+                    "apt": r"[a-z0-9][a-z0-9+.-]+"}
+        if not re.fullmatch(patterns[ecosystem], value):
+            raise ValueError("invalid " + ecosystem + " package name")
+        return value.lower().replace("_", "-") if ecosystem == "cargo" else value.lower()
+    if ecosystem == "maven":
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*:[A-Za-z0-9_.-]+", value):
+            raise ValueError("Maven identities must be groupId:artifactId")
         return value
     raise ValueError("unsupported dependency ecosystem")
 

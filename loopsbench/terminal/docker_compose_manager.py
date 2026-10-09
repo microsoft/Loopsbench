@@ -367,8 +367,24 @@ class DockerComposeManager:
     def start(self) -> Container:
         # Validate task-owned input before adding trusted network controllers.
         self._validate_task_compose_security()
+        managed = self._dependency_access is not None and self._dependency_access.mode == "managed"
+        if managed:
+            # Read the actual image PATH before injecting transparent tool
+            # wrappers. Building still uses the preparation network policy.
+            if self._docker_image_strategy == DockerImageStrategy.REMOTE:
+                self._pull_remote_image()
+                # The tester may use a different remote image; its PATH must
+                # also be available before dependency wrappers are composed.
+                self._run_compose(["pull", "--policy", "missing", "tester"])
+            elif self._docker_image_strategy == DockerImageStrategy.LOCAL_BUILD:
+                self._run_compose(["build"])
+            else:
+                self._ensure_local_image_exists()
+            self._capture_image_resolution()
         self._configure_network()
-        if self._docker_image_strategy == DockerImageStrategy.REMOTE:
+        if managed:
+            self._run_compose(["up", "-d", "--no-build"])
+        elif self._docker_image_strategy == DockerImageStrategy.REMOTE:
             self._pull_remote_image()
             self._capture_image_resolution()
             self._run_compose(["up", "-d", "--no-build"])

@@ -78,11 +78,11 @@ def gateway(tmp_path, registry, policy=None, **options):
 def wheel(name, version):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, 'w') as archive:
-        archive.writestr(f'{name}/__init__.py', f'__version__ = {version!r}\n')
+        archive.writestr(zipfile.ZipInfo(f'{name}/__init__.py'), f'__version__ = {version!r}\n')
         prefix = f'{name}-{version}.dist-info/'
-        archive.writestr(prefix + 'METADATA', f'Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n')
-        archive.writestr(prefix + 'WHEEL', 'Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
-        archive.writestr(prefix + 'RECORD', '')
+        archive.writestr(zipfile.ZipInfo(prefix + 'METADATA'), f'Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n')
+        archive.writestr(zipfile.ZipInfo(prefix + 'WHEEL'), 'Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
+        archive.writestr(zipfile.ZipInfo(prefix + 'RECORD'), '')
     return stream.getvalue()
 
 

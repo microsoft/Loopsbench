@@ -20,16 +20,12 @@ from urllib.parse import quote, unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 try:
-    from .protocol import canonical_package, check_package
+    from .protocol import GatewayError, canonical_package, check_package
+    from .registries import RegistryProtocols, simple_files
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from protocol import canonical_package, check_package
-
-
-class GatewayError(Exception):
-    def __init__(self, status: int, message: str):
-        super().__init__(message)
-        self.status = status
+    from protocol import GatewayError, canonical_package, check_package
+    from registries import RegistryProtocols, simple_files
 
 
 class CheckedRedirect(HTTPRedirectHandler):
@@ -59,6 +55,7 @@ class Gateway:
         self.instance_id = str(uuid.uuid4())
         self.digest = hashlib.sha256(json.dumps(self.policy, sort_keys=True).encode()).hexdigest()
         self.total = sum(p.stat().st_size for p in (data / "blobs").iterdir() if p.is_file())
+        self.registries = RegistryProtocols(self)
         self._save_status()
         (data / "policy.json").write_text(json.dumps(self.policy, indent=2))
 
@@ -132,6 +129,8 @@ class Gateway:
 
     def python_files(self, package: str) -> list[dict]:
         package = check_package(self.policy, "python", package)
+        if self.service.get("python_simple_url"):
+            return simple_files(self, package)
         url = self.service["python_metadata_url"].rstrip("/") + "/" + package + "/json"
         try:
             metadata = json.loads(self.fetch(url, self.service["python_artifact_hosts"]))
@@ -154,7 +153,7 @@ class Gateway:
                 files.append(item)
         return files
 
-    def route(self, path: str) -> tuple[bytes, str]:
+    def route(self, path: str, origin: str = "http://loopsbench-dependencies:8080") -> tuple[bytes, str]:
         parsed = urlsplit(path)
         if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment or not path.startswith("/"):
             raise GatewayError(400, "only package protocol paths are accepted")
@@ -172,6 +171,9 @@ class Gateway:
         if not match:
             raise GatewayError(404, "unknown package protocol route")
         role, path = match.groups()
+        response = self.registries.route(role, path, origin)
+        if response is not None:
+            return response
         if match := re.fullmatch(r"/python/simple/([A-Za-z0-9_.-]+)/?", path):
             package = check_package(self.policy, "python", match[1])
             links = []
@@ -217,7 +219,11 @@ def make_server(gateway: Gateway, address=("0.0.0.0", 8080)):
             role = "tester" if self.path.startswith("/tester/") else "client"
             status = 200
             try:
-                body, content_type = gateway.route(self.path)
+                host = self.headers.get("Host", "")
+                if not re.fullmatch(r"[A-Za-z0-9.\[\]:_-]+", host):
+                    raise GatewayError(400, "invalid gateway host")
+                origin = gateway.service.get("endpoint") or "http://" + host
+                body, content_type = gateway.route(self.path, origin.rstrip("/"))
             except PermissionError:
                 status, body, content_type = 403, b"package rejected by task dependency policy", "text/plain"
             except (ValueError, UnicodeError):
@@ -233,12 +239,15 @@ def make_server(gateway: Gateway, address=("0.0.0.0", 8080)):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             try:
-                self.wfile.write(body)
+                if self.command != "HEAD":
+                    self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
         def log_message(self, *_args):
             pass
+
+        do_HEAD = do_GET
 
     return ThreadingHTTPServer(address, Handler)
 

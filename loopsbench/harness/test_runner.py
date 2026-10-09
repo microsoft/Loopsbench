@@ -60,8 +60,8 @@ class TestRunner:
             return
         script = (
             "set -e; "
-            "command -v rsync >/dev/null || "
-            "((apt-get update -qq && apt-get install -y -qq rsync >/dev/null) || true); "
+            + ("" if self.dependencies is not None else
+               "command -v rsync >/dev/null || ((apt-get update -qq && apt-get install -y -qq rsync >/dev/null) || true); ") +
             "test -x /bin/bash || test -x /usr/bin/bash"
         )
         subprocess.run(
@@ -90,6 +90,12 @@ class TestRunner:
         timeout_sec: int = 600,
         mode: str = "run_tests_sh",
     ) -> TestRunResult:
+        if self.dependencies is not None and hasattr(self.dependencies, "reset_tester"):
+            try:
+                if self.dependencies.reset_tester(snapshot_path, self.workspace_mount):
+                    self._bootstrapped = False
+            except DependencyInfrastructureError as exc:
+                return TestRunResult(exit_code=125, infrastructure_error=str(exc), raw_stderr=str(exc), raw_stdout="__EXIT__125\n")
         self.bootstrap()
         started = time.monotonic()
         checkpoint = None

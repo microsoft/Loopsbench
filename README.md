@@ -156,7 +156,7 @@ loopsbench run --config run.yaml --model-config model-env.yaml
 
 See [network access](docs/guides/running.md#network-access) for container network settings and additional allowed hosts.
 
-Tasks can optionally use a [controlled dependency service](docs/guides/running.md#controlled-dependency-service) for Python and Go. It lets agents change dependency versions and installs the submitted dependencies in a fresh tester environment, while keeping direct access to GitHub and public package registries blocked. Existing tasks keep their current network behavior unless enabled in the task or run configuration.
+Tasks can optionally use a [controlled dependency service](docs/guides/running.md#controlled-dependency-service) for PyPI, Go, npm, Cargo, Maven/Gradle, NuGet and configured apt repositories. It lets agents change dependency versions through a task-scoped gateway, with separate installation plugins and trusted declarations for other source/toolchain archives. Direct access to GitHub and public registries stays blocked. Existing tasks keep their current network behavior unless enabled in the task or run configuration.
 
 ## Python API
 

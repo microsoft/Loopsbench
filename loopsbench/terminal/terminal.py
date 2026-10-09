@@ -61,15 +61,13 @@ class Terminal:
 
     @property
     def tester_container(self) -> Container | None:
-        return self._tester_container
+        # System-dependency isolation may recreate the tester between snapshots.
+        return getattr(self._compose_manager, "tester_container", self._tester_container)
 
     def create_session(self, name: str, use_tester: bool = False) -> TmuxSession:
         """Create a new tmux session in the selected container."""
-        container = (
-            self._tester_container
-            if use_tester and self._tester_container is not None
-            else self._container
-        )
+        tester = self.tester_container
+        container = tester if use_tester and tester is not None else self._container
         container_name = getattr(container, "name", None)
         return TmuxSession(
             container=container,

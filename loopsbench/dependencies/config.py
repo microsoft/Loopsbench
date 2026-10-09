@@ -9,10 +9,61 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from loopsbench.dependencies.protocol import canonical_package
+from loopsbench.dependencies.protocol import ECOSYSTEMS, canonical_package
 from loopsbench.terminal.network_policy import NetworkPlan, NetworkPolicy
 
-Ecosystem = Literal["python", "go"]
+Ecosystem = Literal["python", "go", "npm", "cargo", "maven", "nuget", "apt"]
+Preparation = Literal["python", "go", "npm", "cargo", "maven", "gradle", "nuget"]
+
+
+class TrustedSource(BaseModel):
+    """An exact, operator-approved archive, toolchain or Git bundle."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    url: str
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    filename: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
+    redirect_hosts: list[str] = Field(default_factory=list)
+
+    @field_validator("redirect_hosts")
+    @classmethod
+    def exact_redirect_hosts(cls, values):
+        if any("*" in host or "/" in host for host in values):
+            raise ValueError("source redirect hosts must be exact hostnames")
+        return NetworkPolicy.validate_hosts(values)
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        validate_url(self.url)
+        NetworkPolicy.validate_hosts(self.redirect_hosts)
+        return self
+
+
+class AptRepository(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    url: str
+    suites: list[str]
+    components: list[str] = Field(default_factory=lambda: ["main"])
+    architectures: list[str] = Field(default_factory=lambda: ["amd64"])
+    # Existing task-image keyring; gateway never disables apt signature checks.
+    signed_by: str = "/usr/share/keyrings/debian-archive-keyring.gpg"
+
+    @model_validator(mode="after")
+    def validate_repository(self):
+        import re
+        for values in (self.suites, self.components, self.architectures):
+            if not values or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", v) for v in values):
+                raise ValueError("apt suites/components/architectures must be nonempty path segments")
+        if not re.fullmatch(r"/[A-Za-z0-9/_.-]+", self.signed_by) or ".." in self.signed_by.split("/"):
+            raise ValueError("signed_by must be an absolute keyring path")
+        return self
+
+
+def validate_url(url: str, insecure: bool = False):
+    p = urlsplit(url)
+    if (p.scheme not in ({"http", "https"} if insecure else {"https"}) or not p.hostname
+            or p.username or p.password or p.query or p.fragment):
+        raise ValueError("dependency URLs require HTTPS without credentials/query/fragment (HTTP needs allow_insecure_upstreams)")
+    _ = p.port
 
 
 class PythonPreparation(BaseModel):
@@ -48,8 +99,13 @@ def validate_relative_path(value: str) -> str:
 class DependencyAccess(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: Literal["managed", "disabled"] = "managed"
-    ecosystems: list[Ecosystem] = Field(default_factory=list)
+    ecosystems: list[Ecosystem] = Field(default_factory=lambda: list(ECOSYSTEMS))
     blocked_packages: dict[Ecosystem, list[str]] = Field(default_factory=dict)
+    # None detects root manifests. Explicit [] exposes protocols without an
+    # automatic install. Enabling a protocol never requires that tool installed.
+    prepare: list[Preparation] | None = None
+    projects: dict[Preparation, list[str]] = Field(default_factory=dict)
+    sources: dict[str, TrustedSource] = Field(default_factory=dict)
     python: PythonPreparation = Field(default_factory=PythonPreparation)
     go_modules: list[str] = Field(default_factory=lambda: ["."])
     prepare_timeout_sec: int = Field(default=600, ge=1, le=3600)
@@ -61,25 +117,40 @@ class DependencyAccess(BaseModel):
 
     @model_validator(mode="after")
     def validate_policy(self):
+        import re
         if self.mode == "managed" and not self.ecosystems:
             raise ValueError("managed dependency access requires explicit ecosystems")
         if len(set(self.ecosystems)) != len(self.ecosystems):
             raise ValueError("duplicate dependency ecosystems")
-        for ecosystem in self.ecosystems:
-            if not self.blocked_packages.get(ecosystem):
-                raise ValueError(f"declare the target package and aliases in blocked_packages.{ecosystem}")
+        if self.mode == "managed" and not any(self.blocked_packages.values()):
+            raise ValueError("declare trusted target identities and aliases in blocked_packages")
         for ecosystem, packages in self.blocked_packages.items():
             for package in packages:
                 canonical_package(ecosystem, package)
-        if "go" in self.ecosystems and not self.go_modules:
-            raise ValueError("go_modules must list at least one snapshot module directory")
+        for kind in [*(self.prepare or []), *self.projects]:
+            if ("maven" if kind == "gradle" else kind) not in self.ecosystems:
+                raise ValueError(f"preparation plugin {kind} requires its package protocol enabled")
+        if self.prepare is not None and len(set(self.prepare)) != len(self.prepare):
+            raise ValueError("duplicate preparation plugins")
+        if "python" in self.projects:
+            raise ValueError("configure Python project paths with python.project and python.requirements_files")
+        for paths in self.projects.values():
+            if not paths:
+                raise ValueError("project lists must not be empty")
+            for path in paths:
+                validate_relative_path(path)
+        if any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name) for name in self.sources):
+            raise ValueError("source IDs must be lowercase path segments")
         return self
 
     def wire_policy(self) -> dict:
-        return {"ecosystems": sorted(self.ecosystems), "blocked_packages": {
+        policy = {"ecosystems": sorted(self.ecosystems), "blocked_packages": {
             kind: sorted({canonical_package(kind, value) for value in values})
             for kind, values in sorted(self.blocked_packages.items())
         }}
+        if self.sources:
+            policy["sources"] = {name: source.model_dump() for name, source in sorted(self.sources.items())}
+        return policy
 
     def policy_digest(self) -> str:
         return hashlib.sha256(json.dumps(self.wire_policy(), sort_keys=True).encode()).hexdigest()
@@ -92,10 +163,22 @@ class DependencyService(BaseModel):
     # policy. A generic PyPI/Go proxy is an upstream, never a policy gateway.
     endpoint: str | None = None
     python_metadata_url: str = "https://pypi.org/pypi"
+    # PEP 503 Simple API supports standard artifact-server mirrors.
+    python_simple_url: str | None = None
     python_artifact_hosts: list[str] = Field(default_factory=lambda: ["files.pythonhosted.org"])
     go_proxy_url: str = "https://proxy.golang.org"
     go_artifact_hosts: list[str] = Field(default_factory=lambda: ["storage.googleapis.com"])
     go_sumdb_url: str = "https://sum.golang.org"
+    npm_registry_url: str = "https://registry.npmjs.org"
+    npm_artifact_hosts: list[str] = Field(default_factory=list)
+    cargo_index_url: str = "https://index.crates.io"
+    cargo_download_url: str = "https://static.crates.io/crates/{crate}/{crate}-{version}.crate"
+    cargo_artifact_hosts: list[str] = Field(default_factory=list)
+    maven_repository_urls: list[str] = Field(default_factory=lambda: ["https://repo.maven.apache.org/maven2", "https://plugins.gradle.org/m2"])
+    maven_artifact_hosts: list[str] = Field(default_factory=lambda: ["plugins-artifacts.gradle.org", "repo.maven.apache.org"])
+    nuget_flat_url: str = "https://api.nuget.org/v3-flatcontainer"
+    nuget_artifact_hosts: list[str] = Field(default_factory=list)
+    apt_repositories: dict[str, AptRepository] = Field(default_factory=dict)
     allow_insecure_upstreams: bool = False
     request_timeout_sec: int = Field(default=45, ge=1, le=300)
     max_artifact_bytes: int = Field(default=256 * 1024 * 1024, ge=1024)
@@ -110,19 +193,27 @@ class DependencyService(BaseModel):
             raise ValueError("external dependency service requires endpoint; docker service must not set it")
         if self.provider == "external" and self.replay_from:
             raise ValueError("configure replay at the external service")
-        for url in [self.python_metadata_url, self.go_proxy_url, self.go_sumdb_url, self.endpoint]:
+        import re
+        if not self.maven_repository_urls:
+            raise ValueError("maven_repository_urls must not be empty")
+        if any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name) for name in self.apt_repositories):
+            raise ValueError("apt repository IDs must be lowercase path segments")
+        if set(re.findall(r"\{([^}]+)\}", self.cargo_download_url)) - {"crate", "version", "prefix", "lowerprefix"}:
+            raise ValueError("unknown Cargo download URL placeholder")
+        for url in [self.python_metadata_url, self.python_simple_url, self.go_proxy_url, self.go_sumdb_url,
+                    self.npm_registry_url, self.cargo_index_url, self.cargo_download_url,
+                    *self.maven_repository_urls, self.nuget_flat_url,
+                    *(repo.url for repo in self.apt_repositories.values()), self.endpoint]:
             if url is None:
                 continue
+            validate_url(url, self.allow_insecure_upstreams or url == self.endpoint)
             p = urlsplit(url)
-            if (p.scheme not in {"http", "https"} or not p.hostname or p.username or p.password
-                    or p.query or p.fragment):
-                raise ValueError("dependency URLs must be HTTP(S) URLs without credentials/query/fragment")
-            _ = p.port
             if url == self.endpoint and p.path not in {"", "/"}:
                 raise ValueError("external gateway endpoint must be a dedicated origin without a path prefix")
             if url != self.endpoint and p.scheme != "https" and not self.allow_insecure_upstreams:
                 raise ValueError("HTTP upstreams require allow_insecure_upstreams (local integration tests only)")
-        for host in [*self.python_artifact_hosts, *self.go_artifact_hosts]:
+        for host in [*self.python_artifact_hosts, *self.go_artifact_hosts, *self.npm_artifact_hosts,
+                     *self.cargo_artifact_hosts, *self.maven_artifact_hosts, *self.nuget_artifact_hosts]:
             if "*" in host or "/" in host:
                 raise ValueError("artifact hosts must be exact hostnames")
             NetworkPolicy.validate_hosts([host])

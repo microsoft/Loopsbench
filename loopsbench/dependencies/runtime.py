@@ -7,16 +7,18 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 from loopsbench.dependencies.config import DependencyAccess, DependencyService
-from loopsbench.dependencies.prepare import runtime_environment
+from loopsbench.dependencies.prepare import TOOLS, runtime_environment
 
 SERVICE = "loopsbench-dependencies"
 NETWORK = "loopsbench-dependency-access"
-IMAGE = "loopsbench-dependencies:v1"
+IMAGE = "loopsbench-dependencies:v2"
 MOUNT = "/opt/loopsbench-dependencies"
 CONFIG = "/opt/loopsbench-dependency-config.json"
 
@@ -37,6 +39,54 @@ class DependencyRuntime:
         self.client_environment: dict[str, str] = {}
         self.client_phase_files: dict[str, Path] = {}
         self.client_preparation: dict[str, str] = {}
+        self.phase_path = directory / "client-phase"
+        self.phase_path.write_text("preparation")
+        # Host updates in place; container access is read-only via the mount.
+        self.phase_path.chmod(0o644)
+
+    @property
+    def resets_system_packages(self):
+        return "apt" in self.access.ecosystems and bool(self.service.apt_repositories)
+
+    def reset_tester(self, snapshot_path: str, workspace: str) -> bool:
+        """apt/dpkg state needs a fresh writable layer, not a cache deletion.
+
+        Direct evaluations already copied /workspace. Preserve only that tree;
+        regression snapshots remain available in their existing trusted mount.
+        The shared evaluation lock covers recreation, copying and execution.
+        """
+        if not self.resets_system_packages:
+            return False
+        from loopsbench.terminal.docker_compose_manager import (
+            docker_command,
+            docker_env,
+        )
+
+        try:
+            with tempfile.TemporaryFile() as archive:
+                if snapshot_path == workspace:
+                    # Docker's archive API can silently omit tmpfs contents.
+                    # Read/write within the container's mount namespace instead.
+                    subprocess.run(docker_command(["exec", self.manager.tester_container.name,
+                                                   "tar", "-C", workspace, "-cf", "-", "."]),
+                                   stdout=archive, stderr=subprocess.PIPE, check=True,
+                                   timeout=self.access.prepare_timeout_sec, env=docker_env())
+                    archive.seek(0)
+                self.manager._run_compose(["up", "-d", "--no-build", "--no-deps", "--force-recreate", "--renew-anon-volumes", "tester"])
+                container = self.manager._service_container("tester")
+                if container is None:
+                    raise RuntimeError("fresh tester did not start")
+                self.manager._tester_container = container
+                if snapshot_path == workspace:
+                    result = container.exec_run(["mkdir", "-p", workspace])
+                    if result.exit_code:
+                        raise RuntimeError("cannot create workspace in fresh tester")
+                    subprocess.run(docker_command(["exec", "-i", container.name, "tar", "-C", workspace, "-xf", "-"]),
+                                   stdin=archive, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                                   timeout=self.access.prepare_timeout_sec, env=docker_env())
+            return True
+        except Exception as exc:
+            raise DependencyInfrastructureError("cannot recreate tester for system dependency isolation") from exc
 
     @staticmethod
     def _pip_config(items: dict) -> str:
@@ -83,9 +133,11 @@ class DependencyRuntime:
         if tester is None:
             raise DependencyInfrastructureError("managed dependencies require a tester container")
         probes = ["command -v python3 >/dev/null", "command -v timeout >/dev/null"]
-        if "go" in self.access.ecosystems:
+        if self.resets_system_packages:
+            probes.append("command -v tar >/dev/null")
+        if "go" in (self.access.prepare or []):
             probes.append("command -v go >/dev/null")
-        if "python" in self.access.ecosystems:
+        if "python" in (self.access.prepare or []):
             probes.append(shlex.join([self.access.python.interpreter, "-I", "-c", "import venv, ensurepip"]))
         if tester.exec_run(["bash", "-c", " && ".join(probes)]).exit_code:
             raise DependencyInfrastructureError("task image lacks tools required for managed dependency preparation")
@@ -93,13 +145,14 @@ class DependencyRuntime:
         baseline = dict(item.split("=", 1) for item in image.attrs.get("Config", {}).get("Env", []) if "=" in item)
         baseline.update(self.client_environment)
         original_env = {key: baseline.get(key) or "" for key in self.client_managed_env}
-        if "python" in self.access.ecosystems:
+        if "python" in self.access.ecosystems and container.exec_run(
+                [self.access.python.interpreter, "-I", "-c", "import pip"], environment=original_env).exit_code == 0:
             script = "import json; from pip._internal.configuration import Configuration; c=Configuration(isolated=False); c.load(); print(json.dumps(dict(c.items())))"
             result = container.exec_run([self.access.python.interpreter, "-I", "-c", script], environment=original_env)
             if result.exit_code:
                 raise DependencyInfrastructureError("cannot read original client pip configuration")
             self.client_preparation["python"] = self._pip_config(json.loads(result.output))
-        if "go" in self.access.ecosystems:
+        if "go" in self.access.ecosystems and container.exec_run(["sh", "-c", "command -v go >/dev/null"]).exit_code == 0:
             keys = [key for key in self.client_managed_env if key.startswith("GO") and key != "GOENV"]
             result = container.exec_run(["go", "env", "-json", *keys], environment=original_env)
             if result.exit_code:
@@ -109,6 +162,7 @@ class DependencyRuntime:
         self.client_phase(False)
 
     def client_phase(self, solving: bool):
+        self.phase_path.write_text("solving" if solving else "preparation")
         managed = runtime_environment({"access": self.access.model_dump(), "endpoint": self.endpoint}, "client", {})
         for ecosystem, path in self.client_phase_files.items():
             content = self.client_preparation.get(ecosystem, "")
@@ -145,7 +199,9 @@ class DependencyRuntime:
         launcher = self.directory / "prepare.py"
         shutil.copyfile(code / "prepare.py", launcher)
         launcher.chmod(0o444)
-        client_config = {"access": self.access.model_dump(), "endpoint": self.endpoint}
+        client_config = {"access": self.access.model_dump(), "endpoint": self.endpoint,
+                         "wrapper_bin": MOUNT + "/bin", "phase_file": MOUNT + "/phase",
+                         "apt_repositories": {name: repo.model_dump() for name, repo in self.service.apt_repositories.items()}}
         runtime_path = self.directory / "runtime.json"
         runtime_path.write_text(json.dumps(client_config))
         runtime_path.chmod(0o444)
@@ -191,11 +247,16 @@ class DependencyRuntime:
                 raise ValueError("managed dependencies require both client and tester services")
             service = services[name]
             reserved = {CONFIG, MOUNT + "/prepare.py", "/tmp/loopsbench-dependencies",
+                        MOUNT + "/bin", MOUNT + "/phase", "/tmp/loopsbench-client-dependencies",
                         "/opt/loopsbench-client-pip.conf", "/opt/loopsbench-client-go.env"}
             for mount in service.get("volumes", []):
                 target = mount.get("target") if isinstance(mount, dict) else mount.split(":")[1 if ":" in mount else 0]
                 if target in reserved:
                     raise ValueError(f"task volume conflicts with reserved dependency path: {target}")
+                if name == "tester" and self.resets_system_packages:
+                    readonly = mount.get("read_only", False) if isinstance(mount, dict) else "ro" in mount.split(":")[2:]
+                    if not readonly and not any(Path(target).is_relative_to(root) for root in ("/workspace", "/snapshots", "/shared", "/logs")):
+                        raise ValueError("managed apt cannot reset tester system state kept in writable task volumes: " + target)
             service.setdefault("volumes", []).extend([f"{launcher}:{MOUNT}/prepare.py:ro", f"{runtime_path}:{CONFIG}:ro"])
             # Solver can use ordinary pip/go commands. Do not put its agent
             # controller into the tester's fresh Python environment.
@@ -210,6 +271,9 @@ class DependencyRuntime:
                 raise ValueError("expected resolved Compose environment mapping")
             if name == "client":
                 self.client_environment = dict(current)
+                # New tools use phase-aware CLI wrappers. Leave their original
+                # environment intact while agents install/initialize themselves.
+                env = {key: value for key, value in env.items() if key.startswith(("PIP_", "GO"))}
                 self.client_managed_env = dict(env)
                 current.update({key: "" for key in env})
                 for ecosystem, variable, destination in (
@@ -229,6 +293,22 @@ class DependencyRuntime:
                         service["volumes"].append(f"{path}:{destination}:ro")
             else:
                 current.update(env)
+            wrapper_tools = [tool for tool, ecosystem in TOOLS.items() if ecosystem in self.access.ecosystems]
+            if wrapper_tools:
+                wrapper_dir = self.directory / (name + "-bin")
+                wrapper_dir.mkdir(mode=0o755, exist_ok=True)
+                for tool in wrapper_tools:
+                    path = wrapper_dir / tool
+                    path.write_text("#!/usr/bin/env python3\nimport os, sys\nos.execvp('python3', ['python3', '-I', "
+                                    + repr(MOUNT + "/prepare.py") + ", " + repr(CONFIG) + ", 'tool', "
+                                    + repr(role) + ", " + repr(tool) + ", *sys.argv[1:]])\n")
+                    path.chmod(0o555)
+                service["volumes"].extend([f"{wrapper_dir}:{MOUNT}/bin:ro", f"{self.phase_path}:{MOUNT}/phase:ro"])
+                if self.manager is None:
+                    raise ValueError("dependency wrappers require resolved task image configuration")
+                image = self.manager._client.images.get(service["image"])
+                image_env = dict(item.split("=", 1) for item in image.attrs.get("Config", {}).get("Env", []) if "=" in item)
+                current["PATH"] = MOUNT + "/bin:" + (current.get("PATH") or image_env.get("PATH") or os.defpath)
             if self.service.provider == "docker":
                 networks = service.setdefault("networks", {"default": {}})
                 if isinstance(networks, list):
