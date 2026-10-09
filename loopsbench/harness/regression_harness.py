@@ -14,9 +14,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from loopsbench.harness.unit_tracker import UnitTracker
+from loopsbench.dependencies.runtime import DependencyRuntime
 from loopsbench.harness.snapshot import Snapshotter
 from loopsbench.harness.test_runner import TestRunner
+from loopsbench.harness.unit_tracker import UnitTracker
 
 log = logging.getLogger("regression_harness")
 
@@ -41,6 +42,7 @@ class HarnessConfig:
     test_mode: str = "unit_runner"
     # Only used for run_tests_sh: trigger every N accumulated diff lines.
     standalone_diff_step: int = 80
+    dependencies: DependencyRuntime | None = None
 
 
 @dataclass
@@ -56,6 +58,7 @@ class IterationRecord:
     failed_count: int = 0
     exit_code: int | None = None
     pytest_log: str | None = None
+    infrastructure_error: str | None = None
 
 
 class RegressionHarness:
@@ -84,6 +87,7 @@ class RegressionHarness:
         self.runner = TestRunner(
             tester_container=cfg.tester_container,
             workspace_mount=cfg.tester_workspace,
+            dependencies=cfg.dependencies,
         )
         self.history: list[IterationRecord] = []
         self._last_triggered_diff: int = 0
@@ -163,6 +167,15 @@ class RegressionHarness:
             timeout_sec=self.cfg.test_timeout_sec,
             mode=self.cfg.test_mode,
         )
+        if result.infrastructure_error:
+            rec.infrastructure_error = result.infrastructure_error
+            rec.exit_code = result.exit_code
+            self.history.append(rec)
+            self._save_history()
+            # Upstream failures must not update unit progress or regression
+            # transitions. A later observation may retry normally.
+            self._last_triggered_diff = 0
+            return rec
         passed_now = set(result.passed_unit_ids())
         failed_now = set(result.failed) | set(result.errors)
         newly_passed_vs_prev = sorted(passed_now - self._prev_passed)
@@ -223,10 +236,11 @@ class RegressionHarness:
             "passed_count": rec.passed_count,
             "failed_count": rec.failed_count,
             "exit_code": rec.exit_code,
+            "infrastructure_error": rec.infrastructure_error,
             "snapshot_id": rec.snapshot_id,
             "pytest_log": rec.pytest_log,
-            "regression_tests": sorted(self._last_passed),
-            "reproduction_tests": sorted(self._last_failed),
+            "regression_tests": [] if rec.infrastructure_error else sorted(self._last_passed),
+            "reproduction_tests": [] if rec.infrastructure_error else sorted(self._last_failed),
             "iterations": len(self.history),
         }
         target = self.out_dir / "regression_summary.json"

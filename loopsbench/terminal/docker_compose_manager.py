@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator, Mapping, Sequence
 
+from loopsbench.dependencies.config import (
+    DependencyAccess,
+    DependencyService,
+    dependency_network,
+)
+from loopsbench.dependencies.runtime import IMAGE as DEPENDENCY_IMAGE
+from loopsbench.dependencies.runtime import DependencyRuntime
 from loopsbench.task_images.strategy import DockerImageStrategy
 from loopsbench.terminal.network_policy import (
     NetworkPlan,
@@ -122,6 +129,8 @@ class DockerComposeManager:
         agent_logs_path: Path | None = None,
         task_dir: Path | str | None = None,
         network: NetworkPlan | None = None,
+        dependency_access: DependencyAccess | None = None,
+        dependency_service: DependencyService | None = None,
     ):
         docker_module = _get_docker_module()
         try:
@@ -156,6 +165,9 @@ class DockerComposeManager:
         self._agent_logs_path = agent_logs_path
         self._logger = logger.getChild(__name__)
         self._network = network
+        self._dependency_access = dependency_access
+        self._dependency_service = dependency_service or DependencyService()
+        self.dependencies: DependencyRuntime | None = None
         self._network_temp = None
         self._network_controllers: dict[str, str] = {}
         self._image_resolution = DockerImageResolution(
@@ -426,6 +438,9 @@ class DockerComposeManager:
         # phase restoration while the regression worker runs concurrently.
         if self._network is not None:
             self.set_network_policy("tester", self._network.verifier)
+        if self.dependencies is not None:
+            self.dependencies.record_service()
+            self.dependencies.initialize_client(self._client_container)
         return self._client_container
 
     @property
@@ -449,16 +464,32 @@ class DockerComposeManager:
                 self._network_temp = None
 
     def _configure_network(self) -> None:
+        managed = self._dependency_access is not None and self._dependency_access.mode == "managed"
+        if managed:
+            self._network = self._network or NetworkPlan()
+            self._network_temp = tempfile.TemporaryDirectory(prefix="loopsbench-network-")
+            # Task Compose commonly exposes logs_path to the client. Gateway
+            # policy/cache must live beside it, never beneath that mount.
+            directory = (self._logs_path.resolve().parent / "dependencies" if self._logs_path
+                         else Path(self._network_temp.name) / "dependencies")
+            self.dependencies = DependencyRuntime(self._dependency_access, self._dependency_service, directory)
+            self.dependencies.manager = self
+            self._network = dependency_network(self._network, self._dependency_access, self.dependencies.endpoint)
         if self._network is None:
             return
         document = json.loads(self._run_compose(["config", "--format", "json"]).stdout)
+        if self.dependencies is not None:
+            document = self.dependencies.compose(document)
+            if self._dependency_service.provider == "docker":
+                self._run_docker(["build", "-t", DEPENDENCY_IMAGE, str(Path(__file__).parents[1] / "dependencies")])
         image = "loopsbench-egress:harbor-702b860-v1"
         document, self._network_controllers = controlled_compose(document, self._network, image)
         if not self._network_controllers:
             return
         # This is harness infrastructure, separate from the task-image strategy.
         self._run_docker(["build", "-t", image, str(Path(__file__).parent / "egress")])
-        self._network_temp = tempfile.TemporaryDirectory(prefix="loopsbench-network-")
+        if self._network_temp is None:
+            self._network_temp = tempfile.TemporaryDirectory(prefix="loopsbench-network-")
         path = Path(self._network_temp.name) / "compose.json"
         # Compose config already escapes literal dollars for a round trip.
         path.write_text(json.dumps(document))
@@ -499,9 +530,13 @@ class DockerComposeManager:
         policy = self._network.agent_policy(hosts)
         self.set_network_policy("client", policy)
         try:
+            if self.dependencies is not None:
+                self.dependencies.client_phase(True)
             self._record_network_policy(policy)
             yield
         finally:
+            if self.dependencies is not None:
+                self.dependencies.client_phase(False)
             self.set_network_policy("client", self._network.environment)
 
     def build(self) -> None:

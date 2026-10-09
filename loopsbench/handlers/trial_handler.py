@@ -10,9 +10,9 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
+from loopsbench.dependencies.config import DependencyAccess
 from loopsbench.parsers.parser_factory import ResultFormat
 from loopsbench.utils.logger import logger
-
 
 # ---------------------------------------------------------------------------
 # Task difficulty
@@ -65,6 +65,7 @@ class Task(BaseModel):
     parser_name: str | None = Field(default=None)
     result_sources: list[ResultSource] = Field(default_factory=list)
     docker: DockerConfig = Field(default_factory=DockerConfig)
+    dependency_access: DependencyAccess | None = None
     max_agent_timeout_sec: float = Field(default=1800.0)
     max_test_timeout_sec: float = Field(default=3600.0)
     run_tests_in_same_shell: bool = Field(default=False)

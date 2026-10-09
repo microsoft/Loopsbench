@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from loopsbench.agents.agent_name import AgentName
+from loopsbench.dependencies.config import DependencyAccess, DependencyService
 from loopsbench.task_images.strategy import DockerImageStrategy
 from loopsbench.terminal.network_policy import NetworkPlan
 
@@ -39,6 +40,8 @@ class LoopsBenchRunFileConfig(BaseModel):
     n_attempts: int | None = None
     agent_kwargs: dict[str, Any] = Field(default_factory=dict)
     network: NetworkPlan | None = None
+    dependency_service: DependencyService | None = None
+    task_dependency_overrides: dict[str, DependencyAccess] = Field(default_factory=dict)
     global_timeout_multiplier: float | None = None
     global_agent_timeout_sec: float | None = None
     global_test_timeout_sec: float | None = None

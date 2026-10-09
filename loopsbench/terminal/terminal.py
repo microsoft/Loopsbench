@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator
 
+from loopsbench.dependencies.config import DependencyAccess, DependencyService
 from loopsbench.task_images.strategy import DockerImageStrategy
 from loopsbench.terminal.docker_compose_manager import (
     DockerComposeManager,
@@ -107,6 +108,8 @@ def spin_up_terminal(
     cleanup: bool = False,
     task_dir: Path | None = None,
     network: NetworkPlan | None = None,
+    dependency_access: DependencyAccess | None = None,
+    dependency_service: DependencyService | None = None,
 ) -> Generator[Terminal, None, None]:
     """Context manager: start compose stack -> yield Terminal -> tear down."""
     try:
@@ -124,6 +127,8 @@ def spin_up_terminal(
             agent_logs_path=agent_logs_path,
             task_dir=task_dir,
             network=network,
+            dependency_access=dependency_access,
+            dependency_service=dependency_service,
         )
     except Exception as exc:
         raise TerminalStartupError(

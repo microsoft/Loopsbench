@@ -5,8 +5,13 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 
+from loopsbench.dependencies.runtime import (
+    DependencyInfrastructureError,
+    DependencyRuntime,
+)
 from loopsbench.parsers._pytest_nested_filter import should_skip_nested_pytest_nodeid
 from loopsbench.parsers._text_utils import normalize_terminal_text
 from loopsbench.terminal.docker_compose_manager import docker_command, docker_env
@@ -21,6 +26,7 @@ class TestRunResult:
     skipped: list[str] = field(default_factory=list)
     raw_stdout: str = ""
     raw_stderr: str = ""
+    infrastructure_error: str | None = None
 
     def passed_unit_ids(self) -> list[str]:
         out = []
@@ -40,11 +46,13 @@ class TestRunner:
         tests_dir: str = "/tests",
         workspace_mount: str = "/workspace",
         script_path: str = "/task-assets/run-tests.sh",
+        dependencies: DependencyRuntime | None = None,
     ) -> None:
         self.tester_container = tester_container
         self.tests_dir = tests_dir
         self.workspace_mount = workspace_mount
         self.script_path = script_path
+        self.dependencies = dependencies
         self._bootstrapped = False
 
     def bootstrap(self) -> None:
@@ -71,7 +79,20 @@ class TestRunner:
         timeout_sec: int = 600,
         mode: str = "run_tests_sh",
     ) -> TestRunResult:
+        if self.dependencies is not None:
+            with self.dependencies.evaluation_lock:
+                return self._run(snapshot_path, timeout_sec, mode)
+        return self._run(snapshot_path, timeout_sec, mode)
+
+    def _run(
+        self,
+        snapshot_path: str,
+        timeout_sec: int = 600,
+        mode: str = "run_tests_sh",
+    ) -> TestRunResult:
         self.bootstrap()
+        started = time.monotonic()
+        checkpoint = None
         workspace = shlex.quote(self.workspace_mount)
         snapshot = shlex.quote(snapshot_path)
         prepare_workspace = ""
@@ -81,6 +102,41 @@ class TestRunner:
                 f"rsync -a {snapshot}/ {workspace}/ 2>/dev/null || "
                 f"cp -a {snapshot}/. {workspace}/; "
             )
+        if self.dependencies is not None:
+            try:
+                checkpoint = self.dependencies.checkpoint()
+                # Preparation output never enters the test result parser: a
+                # package install can execute arbitrary submitted code.
+                commands = []
+                if prepare_workspace:
+                    commands.append(["bash", "-c", "set -e; " + prepare_workspace])
+                commands.append(self.dependencies.prepare_argv(self.workspace_mount))
+                with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as log:
+                    preparation_exit = 0
+                    for argv in commands:
+                        remaining = max(1, timeout_sec - (time.monotonic() - started))
+                        try:
+                            bounded = ["timeout", "--signal=TERM", "--kill-after=5s", str(max(1, int(remaining))), *argv]
+                            completed = subprocess.run(docker_command(["exec", self.tester_container, *bounded]),
+                                                       stdout=log, stderr=subprocess.STDOUT,
+                                                       timeout=remaining + 10, env=docker_env())
+                            preparation_exit = completed.returncode
+                        except subprocess.TimeoutExpired:
+                            preparation_exit = 124
+                        if preparation_exit:
+                            break
+                    log.seek(0)
+                    preparation_log = log.read()
+                log_path = self.dependencies.directory / f"prepare-{time.time_ns()}.log"
+                log_path.write_text(preparation_log)
+                self.dependencies.check_since(checkpoint)
+                if preparation_exit:
+                    return TestRunResult(exit_code=preparation_exit, raw_stdout=f"__EXIT__{preparation_exit}\n",
+                                         raw_stderr=f"snapshot dependency preparation failed; see {log_path.name}")
+                prepare_workspace = ""
+            except DependencyInfrastructureError as exc:
+                return TestRunResult(exit_code=125, infrastructure_error=str(exc), raw_stderr=str(exc),
+                                     raw_stdout="__EXIT__125\n")
         script = (
             f"set -e; {prepare_workspace}"
             f"cd {workspace}; (git init -q 2>/dev/null; git add -A 2>/dev/null; "
@@ -97,14 +153,18 @@ class TestRunner:
             f"; exit 127; fi; "
             'exec bash "$RUN_TESTS_SCRIPT"'
         )
-        cmd = [*docker_command(["exec", self.tester_container, "bash", "-c"]), script]
+        launcher = self.dependencies.exec_argv() if self.dependencies else []
+        remaining = max(1, timeout_sec - (time.monotonic() - started))
+        if self.dependencies:
+            launcher = ["timeout", "--signal=TERM", "--kill-after=5s", str(max(1, int(remaining))), *launcher]
+        cmd = [*docker_command(["exec", self.tester_container, *launcher, "bash", "-c"]), script]
         # Stream into a host-owned file. Candidate processes cannot replace a
         # workspace log or redirect it through a symlink before collection.
         stderr = ""
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as log:
             try:
                 r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True,
-                                   timeout=timeout_sec, env=docker_env())
+                                   timeout=remaining + (10 if self.dependencies else 0), env=docker_env())
                 exit_code = r.returncode
             except subprocess.TimeoutExpired:
                 exit_code = 124
@@ -120,6 +180,16 @@ class TestRunner:
             raw_stdout=out,
             raw_stderr=stderr,
         )
+
+        if self.dependencies is not None:
+            try:
+                self.dependencies.check_since(checkpoint)
+            except DependencyInfrastructureError as exc:
+                result.exit_code = 125
+                result.infrastructure_error = str(exc)
+                result.raw_stderr = str(exc)
+                result.raw_stdout = re.sub(r"__EXIT__-?\d+\s*$", "__EXIT__125\n", out)
+                return result
 
         self._fill_pytest_buckets(result, out)
         return result

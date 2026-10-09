@@ -31,6 +31,7 @@ from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
 from loopsbench.config import config as loopsbench_config
 from loopsbench.dataset.dataset import Dataset
+from loopsbench.dependencies.config import DependencyAccess, DependencyService
 from loopsbench.handlers.trial_handler import TrialHandler
 from loopsbench.harness.instruction_composer import compose_instruction
 from loopsbench.harness.models import (
@@ -111,8 +112,15 @@ class Harness:
         global_agent_timeout_sec: float | None = None,
         global_test_timeout_sec: float | None = None,
         network: NetworkPlan | dict | None = None,
+        dependency_service: DependencyService | dict | None = None,
+        task_dependency_overrides: dict[str, DependencyAccess | dict] | None = None,
     ):
         self._network = NetworkPlan.from_config(network, agent_kwargs=agent_kwargs)
+        self._dependency_service = DependencyService.model_validate(dependency_service or {})
+        self._task_dependency_overrides = {
+            task_id: DependencyAccess.model_validate(value)
+            for task_id, value in (task_dependency_overrides or {}).items()
+        }
         self._start_time = datetime.now(timezone.utc).isoformat()
 
         self._dataset_path = dataset_path
@@ -512,6 +520,7 @@ PY
                 max_wall_sec=handler.task.max_agent_timeout_sec,
                 test_timeout_sec=int(handler.task.max_test_timeout_sec),
                 output_dir=str(handler.trial_paths.task_output_path / "regression"),
+                dependencies=terminal.compose_manager.dependencies,
             )
             harness = RegressionHarness(cfg)
         except Exception as exc:
@@ -847,6 +856,20 @@ PY
         session,
         handler: TrialHandler,
     ) -> FailureMode:
+        dependencies = terminal.compose_manager.dependencies
+        if dependencies is not None:
+            # Include snapshot copying in the same critical section as prepare
+            # and execution; regression tests share this tester container.
+            with dependencies.evaluation_lock:
+                return self._run_tests_serialized(terminal, session, handler)
+        return self._run_tests_serialized(terminal, session, handler)
+
+    def _run_tests_serialized(
+        self,
+        terminal: Terminal,
+        session,
+        handler: TrialHandler,
+    ) -> FailureMode:
         timeout = (
             self._global_test_timeout_sec
             or handler.task.max_test_timeout_sec * self._global_timeout_multiplier
@@ -866,6 +889,7 @@ PY
             tester_container=handler.tester_container_name,
             workspace_mount="/workspace",
             tests_dir=str(DockerComposeManager.CONTAINER_TEST_DIR),
+            dependencies=terminal.compose_manager.dependencies,
         )
         result = runner.run(
             snapshot_path="/workspace",
@@ -880,6 +904,8 @@ PY
             post_test_text += "\n"
         handler.trial_paths.post_test_pane_path.write_text(post_test_text)
 
+        if result.infrastructure_error:
+            return FailureMode.DEPENDENCY_INFRASTRUCTURE_ERROR
         if result.exit_code == 124:
             self._logger.warning(
                 f"Tests timed out after {timeout}s for {handler.task_id}"
@@ -1368,6 +1394,8 @@ PY
             cleanup=self._cleanup,
             task_dir=handler.task_dir.resolve(),
             network=self._network,
+            dependency_access=self._task_dependency_overrides.get(handler.task_id, handler.task.dependency_access),
+            dependency_service=self._dependency_service,
         )
         with ExitStack() as stack:
             try:
@@ -1590,7 +1618,7 @@ PY
                 post_test = handler.trial_paths.post_test_pane_path.read_text()
 
                 if test_fm != FailureMode.NONE:
-                    if results.failure_mode == FailureMode.UNSET:
+                    if results.failure_mode in (FailureMode.UNSET, FailureMode.NONE) or test_fm == FailureMode.DEPENDENCY_INFRASTRUCTURE_ERROR:
                         results.failure_mode = test_fm
                 else:
                     artifacts = self._collect_result_artifacts(handler, results, post_test)

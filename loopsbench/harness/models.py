@@ -28,6 +28,7 @@ class FailureMode(str, Enum):
     AGENT_SERVER_ERROR = "agent_server_error"
     AGENT_STARTUP_ERROR = "agent_startup_error"
     TEST_TIMEOUT = "test_timeout"
+    DEPENDENCY_INFRASTRUCTURE_ERROR = "dependency_infrastructure_error"
     CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
     OUTPUT_LENGTH_EXCEEDED = "output_length_exceeded"
     FATAL_LLM_PARSE_ERROR = "fatal_llm_parse_error"

@@ -381,7 +381,7 @@ def create(
     network = (run_file.network if run_file else None) or NetworkPlan()
     try:
         network = NetworkPlan.model_validate({
-            **network.model_dump(),
+            **network.model_dump(exclude_unset=True),
             "extra_allowed_hosts": [*network.extra_allowed_hosts, *allow_agent_hosts],
         })
     except ValueError as exc:
@@ -396,6 +396,8 @@ def create(
         model_name=model_str,
         agent_kwargs=processed,
         network=network,
+        dependency_service=run_file.dependency_service if run_file else None,
+        task_dependency_overrides=run_file.task_dependency_overrides if run_file else None,
         no_rebuild=rp["no_rebuild"],
         docker_image_strategy=rp["docker_image_strategy"],
         docker_image_namespace=rp["docker_image_namespace"],
