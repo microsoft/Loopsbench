@@ -8,6 +8,8 @@ set -eu
 ALLOWLIST=/opt/egress-sidecar/allowlist.txt
 GOST_PORT=12345
 GOST_MARK=114514
+DNS_MARK=114515
+DNS_PORT=1053
 NFTABLES_RULESET_NAME=gost_egress
 
 usage() {
@@ -19,7 +21,7 @@ Usage:
   network-policy allow [TARGET...]
   network-policy rules
 
-TARGET can be a domain, wildcard domain, IP, CIDR, or IP range. With no targets,
+TARGET can be an exact domain, IP, or CIDR. With no targets,
 allow mode denies all controlled TCP egress.
 EOF
 }
@@ -29,42 +31,26 @@ ensure_file() {
   touch "$ALLOWLIST"
 }
 
-# Docker DNATs queries to the compose gateway:53 onto 127.0.0.11, so
-# `fib daddr type local` (re-evaluated after DNAT) already allows resolver
-# traffic. Podman aardvark-dns / pasta listen on the network gateway
-# (e.g. 10.89.x.1) with no such DNAT, and the filter chain would reject
-# UDP/TCP 53 (`meta l4proto != tcp reject`). Permit DNS only to nameservers
-# listed in resolv.conf — the same trust boundary Docker's embedded resolver
-# has. Hostname allowlisting still happens in gost via SNI.
-nft_dns_rules() {
-  action="$1"
-  awk -v action="$action" '
-    /^nameserver[[:space:]]+/ {
-      ns = $2
-      sub(/%.*/, "", ns)
-      if (ns ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
-        printf "    ip daddr %s udp dport 53 %s\n", ns, action
-        printf "    ip daddr %s tcp dport 53 %s\n", ns, action
-      } else if (ns ~ /:/) {
-        printf "    ip6 daddr %s udp dport 53 %s\n", ns, action
-        printf "    ip6 daddr %s tcp dport 53 %s\n", ns, action
-      }
-    }
-  ' /etc/resolv.conf
-}
-
 setup_nftables() {
   nft --file - <<EOF
 add table inet $NFTABLES_RULESET_NAME
 flush table inet $NFTABLES_RULESET_NAME
 
 table inet $NFTABLES_RULESET_NAME {
+  # Run before Docker's own DNS DNAT. The trusted resolver snapshot process
+  # alone may contact upstream DNS; task packets reach a static A/AAAA server.
+  chain dns {
+    type nat hook output priority -110; policy accept;
+    meta mark $DNS_MARK return
+    udp dport 53 redirect to :$DNS_PORT
+    tcp dport 53 redirect to :$DNS_PORT
+  }
   chain output {
     type nat hook output priority dstnat; policy accept;
 
     meta mark $GOST_MARK return
+    meta mark $DNS_MARK return
     fib daddr type local return
-$(nft_dns_rules return)
     meta l4proto tcp redirect to :$GOST_PORT
   }
 
@@ -72,8 +58,13 @@ $(nft_dns_rules return)
     type filter hook output priority filter; policy accept;
 
     meta mark $GOST_MARK accept
+    meta mark $DNS_MARK accept
+    # Embedded DNS uses random DNAT ports. Deny the entire resolver address,
+    # including sockets opened before the phase change and direct-port probes.
+    ip daddr 127.0.0.11 reject
+    udp dport 53 reject
+    tcp dport 53 reject
     fib daddr type local accept
-$(nft_dns_rules accept)
     reject
   }
 }
@@ -121,6 +112,26 @@ restart_proxy() {
   kill -0 "$(cat /tmp/gost.pid)"
 }
 
+restart_dns() {
+  rm -f /tmp/dns.ready
+  if [ -f /tmp/dns.pid ]; then
+    kill "$(cat /tmp/dns.pid)" 2>/dev/null || true
+    for attempt in 1 2 3 4 5; do
+      kill -0 "$(cat /tmp/dns.pid)" 2>/dev/null || break
+      sleep 1
+    done
+  fi
+  /bin/egress-dns snapshot "$ALLOWLIST" /tmp/dns-records.json
+  /bin/egress-dns serve /tmp/dns-records.json > /tmp/dns.log 2>&1 &
+  echo "$!" > /tmp/dns.pid
+  for attempt in 1 2 3 4 5; do
+    [ ! -f /tmp/dns.ready ] || break
+    sleep 1
+  done
+  test -f /tmp/dns.ready
+  kill -0 "$(cat /tmp/dns.pid)"
+}
+
 deny_all() {
   nft --file - <<EOF
 add table inet $NFTABLES_RULESET_NAME
@@ -128,6 +139,10 @@ flush table inet $NFTABLES_RULESET_NAME
 table inet $NFTABLES_RULESET_NAME {
   chain egress {
     type filter hook output priority filter; policy drop;
+    # Only the trusted DNS snapshot binary sets this socket mark. Task
+    # containers have neither NET_ADMIN nor NET_RAW (also for SO_MARK).
+    meta mark $DNS_MARK accept
+    ip daddr 127.0.0.11 reject
     udp dport 53 reject
     tcp dport 53 reject
     fib daddr type local accept
@@ -153,6 +168,7 @@ case "$cmd" in
   deny-all)
     : > "$ALLOWLIST"
     deny_all
+    restart_dns
     restart_proxy
     echo "ok: deny external traffic"
     ;;
@@ -165,6 +181,7 @@ case "$cmd" in
         printf '%s\n' "$item" >> "$ALLOWLIST"
       fi
     done
+    restart_dns
     restart_proxy
     setup_nftables
     echo "ok: allowlist applied"

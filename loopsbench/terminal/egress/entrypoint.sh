@@ -2,6 +2,13 @@
 # Adapted from Harbor for LoopsBench; see NOTICE and LICENSE.harbor.
 set -eu
 rm -f /tmp/egress.ready
+# Docker shares these files with containers joining our network namespace.
+# Capture trusted bootstrap configuration before the task can start. GOST's
+# Go resolver must not consult a task-writable /etc/hosts afterward.
+cp /etc/resolv.conf /tmp/egress-resolv.conf
+cp /etc/hosts /tmp/egress-hosts
+chmod 600 /tmp/egress-resolv.conf /tmp/egress-hosts
+printf 'hosts: dns\n' > /etc/nsswitch.conf
 case "${EGRESS_CONTROL_INITIAL_NETWORK_MODE:-public}" in
   public) network-policy allow-all ;;
   no-network) network-policy deny-all ;;

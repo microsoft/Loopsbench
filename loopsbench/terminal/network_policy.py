@@ -97,12 +97,12 @@ class NetworkPolicy(BaseModel):
             try:
                 host = str(ipaddress.ip_network(host, strict=False)) if "/" in host else str(ipaddress.ip_address(host))
             except ValueError:
-                domain = host.removeprefix("*.")
+                domain = host
                 if len(domain) > 253 or not all(
                     re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part)
                     for part in domain.split(".")
                 ):
-                    raise ValueError("allowed_hosts must contain hostnames, IPs or CIDRs, not URLs")
+                    raise ValueError("allowed_hosts must contain exact hostnames, IPs or CIDRs, not URLs or wildcards")
             if host not in result:
                 result.append(host)
         return result
@@ -164,7 +164,7 @@ def controlled_compose(document: dict, plan: NetworkPlan, image: str) -> tuple[d
         if mode not in (None, "bridge", "none"):
             raise ValueError(f"Cannot apply restricted network policy to {name} with network_mode={mode!r}")
         if (service.get("privileged") or service.get("pid") == "host"
-                or {str(cap).upper() for cap in service.get("cap_add", [])} & {"ALL", "NET_ADMIN", "NET_RAW", "SYS_ADMIN"}
+                or {str(cap).upper().removeprefix("CAP_") for cap in service.get("cap_add", [])} & {"ALL", "NET_ADMIN", "NET_RAW", "SYS_ADMIN"}
                 or service.get("use_api_socket")):
             raise ValueError(f"Restricted network policy is incompatible with privileged service {name}")
         sidecar = f"loopsbench-egress-{name}"

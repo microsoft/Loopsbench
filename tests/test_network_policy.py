@@ -86,7 +86,7 @@ def test_policy_validation_and_extra_hosts(monkeypatch):
     plan = NetworkPlan.from_config({"extra_allowed_hosts": ["API.EXAMPLE.COM", "10.2.0.0/16"]})
     assert plan.agent_policy().allowed_hosts == ["api.example.com", "10.2.0.0/16", "proxy.local", "2001:db8::1"]
     assert plan.verifier.network_mode == "no-network"
-    for invalid in ("https://api.example.com/v1", "*", "x;touch /tmp/test", "bad\nhost"):
+    for invalid in ("https://api.example.com/v1", "*", "*.example.com", "x;touch /tmp/test", "bad\nhost"):
         with pytest.raises(ValueError):
             NetworkPolicy(network_mode="allowlist", allowed_hosts=[invalid])
     with pytest.raises(ValueError):
@@ -127,7 +127,8 @@ network:
     assert parsed.network.agent_policy().allowed_hosts == ["model.example.org"]
 
 
-@pytest.mark.parametrize("setting", [{"network_mode": "host"}, {"privileged": True}, {"cap_add": ["NET_ADMIN"]}])
+@pytest.mark.parametrize("setting", [{"network_mode": "host"}, {"privileged": True},
+                                    *({'cap_add': [cap]} for cap in ['NET_ADMIN', 'CAP_NET_ADMIN', 'CAP_NET_RAW', 'CAP_SYS_ADMIN'])])
 def test_incompatible_network_never_silently_runs_unrestricted(setting):
     with pytest.raises(ValueError):
         controlled_compose({"services": {"client": setting}}, NetworkPlan(), "egress:test")
@@ -189,10 +190,16 @@ def test_custom_agent_uses_prepare_then_solve_even_on_failure(tmp_path):
 def test_real_legacy_task_phase_switch_and_separate_verifier(tmp_path):
     image = os.environ.get("LOOPSBENCH_TEST_NETWORK_IMAGE", "python:3.12-slim")
     project = "loopsbench-phase-test-" + tmp_path.name.lower().replace("_", "-")[-24:]
-    server = (
-        "from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer; "
-        "ThreadingHTTPServer(('0.0.0.0',8765),BaseHTTPRequestHandler).serve_forever()"
-    )
+    server = """from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Length', '2')
+        self.end_headers()
+        self.wfile.write(b'ok')
+ThreadingHTTPServer(('0.0.0.0',8765),Handler).serve_forever()
+"""
     data = tmp_path / "legacy-data"
     data.mkdir()
     (data / "sentinel").write_text("legacy-mount")
@@ -219,6 +226,28 @@ def test_real_legacy_task_phase_switch_and_separate_verifier(tmp_path):
         script = "import socket; s=socket.create_connection((" + repr(host) + ",8765),2); s.settimeout(2); s.sendall(b'GET / HTTP/1.0\\r\\nHost: " + host + "\\r\\n\\r\\n'); assert b'HTTP/' in s.recv(1024)"
         return container.exec_run(["python3", "-c", script])
 
+    def dns_probe(container, name, kind, *, tcp=False, port=53, success=False):
+        script = r'''import socket,struct,json
+name,kind,tcp,port=PARAMETERS
+packet=struct.pack('!6H',173,256,1,0,0,0)+b''.join(bytes([len(p)])+p.encode() for p in name.split('.'))+b'\0'+struct.pack('!2H',kind,1)
+resolver=next(l.split()[1] for l in open('/etc/resolv.conf') if l.startswith('nameserver'))
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM);s.settimeout(2)
+try:
+ s.connect((resolver,port))
+ if tcp:
+  s.sendall(struct.pack('!H',len(packet))+packet)
+  stream=s.makefile('rb');length=struct.unpack('!H',stream.read(2))[0];body=stream.read(length)
+ else:
+  s.send(packet);body=s.recv(4096)
+ h=struct.unpack('!6H',body[:12]);ok=h[0]==173 and h[1]&15==0 and h[3]>0
+ print(json.dumps({'rcode':h[1]&15,'answers':h[3]}))
+except (OSError,struct.error) as e:
+ ok=False;print(json.dumps({'error':str(e)}))
+assert ok == EXPECTED
+'''.replace('PARAMETERS', repr((name, kind, tcp, port))).replace('EXPECTED', repr(success))
+        result = container.exec_run(['python3', '-c', script])
+        assert result.exit_code == 0, result.output.decode()
+
     live = None
     try:
         client = manager.start()
@@ -232,7 +261,71 @@ def test_real_legacy_task_phase_switch_and_separate_verifier(tmp_path):
         assert live.stdout.readline().strip() == "ready"
         with manager.agent_network_phase():
             assert fetch(client, "allowed.test").exit_code == 0
+            mark_probe = '''import socket,errno
+s=socket.socket()
+try: s.setsockopt(socket.SOL_SOCKET,socket.SO_MARK,114515)
+except OSError as e: assert e.errno==errno.EPERM
+else: raise AssertionError('task can forge the trusted DNS socket mark')
+'''
+            assert client.exec_run(['python3', '-c', mark_probe]).exit_code == 0
+            for tcp in (False, True):
+                dns_probe(client, 'allowed.test', 1, tcp=tcp, success=True)
+                dns_probe(client, 'example.com', 16, tcp=tcp)
+                dns_probe(client, 'example.com', 1, tcp=tcp)
+                dns_probe(client, 'secret.allowed.test', 1, tcp=tcp)
+                dns_probe(client, 'allowed.test', 16, tcp=tcp)
+                dns_probe(manager.tester_container, 'allowed.test', 1, tcp=tcp)
+            # Docker's embedded DNS listener uses random translated ports.
+            # Directly addressing those ports must not bypass DNS policy.
+            controller = manager._service_container(manager._network_controllers['client'])
+            rules = controller.exec_run(['nft', 'list', 'ruleset']).output.decode()
+            import re
+            hidden_ports = []
+            for line in rules.splitlines():
+                # iptables-nft may render DNAT as an opaque xt target; its
+                # corresponding source-NAT rule still exposes the real port.
+                match = re.search(r'ip saddr 127\.0\.0\.11 (tcp|udp) sport (\d+)', line)
+                if match:
+                    hidden_ports.append((match[1], int(match[2])))
+            assert {protocol for protocol, _ in hidden_ports} == {'tcp', 'udp'}, rules
+            for protocol, port in hidden_ports:
+                dns_probe(client, 'allowed.test', 1, tcp=protocol == 'tcp', port=port)
+            original_hosts = client.exec_run(['cat', '/etc/hosts']).output.decode()
+            original_resolv = client.exec_run(['cat', '/etc/resolv.conf']).output.decode()
+            try:
+                # Joining a Docker namespace also shares these two writable
+                # files. They must not become trusted proxy/resolver policy.
+                poison = "from pathlib import Path; Path('/etc/hosts').write_text('198.51.100.17 allowed.test\\n'); Path('/etc/resolv.conf').write_text('nameserver 127.0.0.1\\n')"
+                assert client.exec_run(['python3', '-c', poison]).exit_code == 0
+                assert b'198.51.100.17' in controller.exec_run(['cat', '/etc/hosts']).output
+                assert fetch(client, 'allowed.test').exit_code == 0
+                manager.set_network_policy('client', NetworkPolicy(network_mode='allowlist', allowed_hosts=['allowed.test']))
+                assert fetch(client, 'allowed.test').exit_code == 0
+                dns_probe(client, 'example.com', 16)
+            finally:
+                restore = "from pathlib import Path; Path('/etc/hosts').write_text(" + repr(original_hosts) + "); Path('/etc/resolv.conf').write_text(" + repr(original_resolv) + ")"
+                assert client.exec_run(['python3', '-c', restore]).exit_code == 0
             assert fetch(client, "blocked.test").exit_code != 0
+            # The proxy must authorize each request on a persistent socket,
+            # including when both names resolve to the same upstream address.
+            keepalive = r"""import socket,http.client
+s=socket.create_connection(('allowed.test',8765),3);s.settimeout(3)
+for host in ['allowed.test','allowed.test','blocked.test']:
+    s.sendall(('GET / HTTP/1.1\r\nHost: '+host+':8765\r\nConnection: keep-alive\r\n\r\n').encode())
+    response=http.client.HTTPResponse(s)
+    try:
+        response.begin()
+        body=response.read()
+    except (OSError,http.client.HTTPException):
+        assert host == 'blocked.test'
+        break
+    assert host != 'blocked.test', 'non-allowlisted Host was forwarded'
+    assert response.status == 200 and body == b'ok'
+else:
+    raise AssertionError('blocked request was not rejected')
+"""
+            result = client.exec_run(["python3", "-c", keepalive])
+            assert result.exit_code == 0, result.output.decode()
             address = manager._service_container("upstream").attrs["NetworkSettings"]["Networks"]
             address = next(iter(address.values()))["IPAddress"]
             assert fetch(client, address).exit_code != 0
