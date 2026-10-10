@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
-from loopsbench.dependencies.config import DependencyAccess
+from loopsbench.dependencies.config import DependencyAccess, DependencyService
 from loopsbench.parsers.parser_factory import ResultFormat
 from loopsbench.utils.logger import logger
 
@@ -66,6 +66,7 @@ class Task(BaseModel):
     result_sources: list[ResultSource] = Field(default_factory=list)
     docker: DockerConfig = Field(default_factory=DockerConfig)
     dependency_access: DependencyAccess | None = None
+    dependency_service: DependencyService | None = None
     max_agent_timeout_sec: float = Field(default=1800.0)
     max_test_timeout_sec: float = Field(default=3600.0)
     run_tests_in_same_shell: bool = Field(default=False)

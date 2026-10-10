@@ -9,6 +9,9 @@ services:
     handler:
       type: red
       metadata:
+        # Package gateways can spend up to 300s fetching a response. Keep the
+        # proxy header deadline above that bound; task timeouts still apply.
+        readTimeout: 330s
         sniffing: true
         sniffing.timeout: 5s
         sniffing.fallback: true

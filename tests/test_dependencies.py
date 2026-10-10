@@ -142,6 +142,29 @@ def test_policy_checked_before_shared_cache(tmp_path, registry):
             g2.route(path)
 
 
+def test_trusted_identity_list_rejects_forks_even_with_cached_artifacts(tmp_path, registry):
+    add_python(registry)
+    g = gateway(tmp_path, registry)
+    assert b'sample' in g.route('/client/python/simple/sample/')[0]
+    listed = access(allowed_packages={'python': ['approved-package'], 'go': ['example.com/dependency']})
+    locked = gateway(tmp_path, registry, listed)
+    with pytest.raises(PermissionError):
+        locked.route('/client/python/simple/sample/')
+    with pytest.raises(PermissionError):
+        locked.route('/client/go/github.com/unlisted/fork/@v/list')
+    assert check_package(listed.wire_policy(), 'python', 'APPROVED_package') == 'approved-package'
+    assert check_package(listed.wire_policy(), 'go', 'example.com/dependency') == 'example.com/dependency'
+    # Allowed identities are exact; a new major module/submodule needs review.
+    with pytest.raises(PermissionError):
+        check_package(listed.wire_policy(), 'go', 'example.com/dependency/v2')
+    with pytest.raises(ValueError, match='every enabled ecosystem'):
+        access(allowed_packages={'go': []})
+    both = access(allowed_packages={'python': ['target-project'], 'go': []})
+    with pytest.raises(PermissionError):
+        check_package(both.wire_policy(), 'python', 'target-project')
+    assert listed.policy_digest() != access().policy_digest()
+
+
 def test_metadata_frozen_and_hash_checked_and_replay_has_no_network(tmp_path, registry):
     item = add_python(registry)
     g = gateway(tmp_path, registry)
@@ -377,3 +400,195 @@ def test_task_cannot_mount_private_gateway_state(tmp_path, source_kind):
     with pytest.raises(ValueError, match='private dependency'):
         runtime.compose(document)
     assert not (tmp_path / 'private/gateway.json').exists()
+
+
+def test_slow_download_does_not_block_other_urls_or_health(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    entered, release = threading.Event(), threading.Event()
+    counts = {}
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            counts[self.path] = counts.get(self.path, 0) + 1
+            if self.path == '/slow':
+                entered.set()
+                assert release.wait(5)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(self.path.encode())
+        def log_message(self, *_args): pass
+
+    with serving(ThreadingHTTPServer(('127.0.0.1', 0), Upstream)) as upstream:
+        g = gateway(tmp_path, (upstream, {}, {}))
+        with serving(make_server(g, ('127.0.0.1', 0))) as endpoint, ThreadPoolExecutor(8) as pool:
+            slow = [pool.submit(g.fetch, upstream + '/slow', [])]
+            try:
+                assert entered.wait(2)
+                slow += [pool.submit(g.fetch, upstream + '/slow', []) for _ in range(4)]
+                assert pool.submit(g.fetch, upstream + '/fast', []).result(timeout=2) == b'/fast'
+                assert json.load(urlopen(endpoint + '/status', timeout=2))['infrastructure_errors'] == {'client': 0, 'tester': 0}
+            finally:
+                release.set()
+            assert [future.result(timeout=2) for future in slow] == [b'/slow'] * 5
+        assert counts == {'/slow': 1, '/fast': 1}
+        assert set(json.loads(g.index_path.read_text())) == {upstream + '/slow', upstream + '/fast'}
+
+
+def test_concurrent_downloads_enforce_shared_cache_capacity(tmp_path, registry):
+    from concurrent.futures import ThreadPoolExecutor
+    endpoint, data, _ = registry
+    data['/one'] = 200, {}, b'a' * 800
+    data['/two'] = 200, {}, b'b' * 800
+    g = gateway(tmp_path, registry, max_cache_bytes=1024)
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(g.fetch, endpoint + path, []) for path in ['/one', '/two']]
+        results = []
+        for future in futures:
+            try:
+                results.append(len(future.result()))
+            except GatewayError as exc:
+                results.append(exc.status)
+    assert sorted(results) == [507, 800]
+    assert g.total == 800
+    assert len(g.index) == len(list((g.data / 'blobs').iterdir())) == 1
+
+
+def test_cached_request_processing_is_bounded_without_blocking_health(tmp_path, registry):
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.parse import urlsplit
+
+    registry[1]['/go/example.com/lib/@v/v1.0.0.mod'] = 200, {}, b'module example.com/lib\n'
+    g = gateway(tmp_path, registry, max_concurrent_requests=2, max_pending_requests=1)
+    path = '/tester/go/example.com/lib/@v/v1.0.0.mod'
+    g.route(path)  # Exercise the cache path, which has no download semaphore.
+    original = g.route
+    release, entered = threading.Event(), threading.Event()
+    lock = threading.Lock()
+    active = peak = 0
+
+    def route(path, origin='http://gateway'):
+        nonlocal active, peak
+        if urlsplit(path).path in {'/healthz', '/status'}:
+            return original(path, origin)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                entered.set()
+        try:
+            assert release.wait(5)
+            return original(path, origin)
+        finally:
+            with lock:
+                active -= 1
+
+    g.route = route
+    with (serving(make_server(g, ('127.0.0.1', 0))) as endpoint,
+          serving(make_server(g, ('127.0.0.1', 0), control_only=True)) as control,
+          ThreadPoolExecutor(8) as pool):
+        futures = [pool.submit(lambda: urlopen(endpoint + path, timeout=5).read()) for _ in range(8)]
+        try:
+            assert entered.wait(2)
+            assert json.load(urlopen(control + '/healthz', timeout=2))['protocol'] == 1
+            assert json.load(urlopen(control + '/status', timeout=2))['infrastructure_errors']['tester'] == 0
+            with pytest.raises(HTTPError) as denied:
+                urlopen(control + path, timeout=2)
+            assert denied.value.code == 404
+        finally:
+            release.set()
+        assert [f.result(timeout=5) for f in futures] == [b'module example.com/lib\n'] * 8
+    assert peak == 2
+    assert registry[2]['/go/example.com/lib/@v/v1.0.0.mod'] == 1
+
+
+def test_representation_cache_and_limits_apply_to_replay(tmp_path):
+    headers = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            headers.append(self.headers.get('Accept'))
+            body = self.headers.get('Accept', 'full').encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *_args): pass
+
+    with serving(ThreadingHTTPServer(('127.0.0.1', 0), Upstream)) as endpoint:
+        g = gateway(tmp_path, (endpoint, {}, {}))
+        url = endpoint + '/metadata'
+        assert g.fetch(url, []) == b'full'
+        assert g.fetch(url, [], accept='install') == b'install'
+        g.service['replay_from'] = 'captured'
+        assert g.fetch(url, [], accept='install') == b'install'
+        with pytest.raises(GatewayError, match='exceeded'):
+            g.fetch(url, [], accept='install', max_bytes=3)
+        with pytest.raises(GatewayError, match='no record'):
+            g.fetch(url, [], accept='different')
+    assert headers == [None, 'install']
+
+
+def test_dropped_response_is_counted_as_infrastructure_error(tmp_path):
+    import socket
+    import struct
+    entered, release, counted = threading.Event(), threading.Event(), threading.Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            entered.set()
+            assert release.wait(5)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'x' * 65536)
+        def log_message(self, *_args): pass
+
+    with serving(ThreadingHTTPServer(('127.0.0.1', 0), Upstream)) as upstream:
+        g = gateway(tmp_path, (upstream, {}, {}))
+        original_audit = g.audit
+        def audit(role, path, status):
+            original_audit(role, path, status)
+            if status == 502:
+                counted.set()
+        g.audit = audit
+        server = make_server(g, ('127.0.0.1', 0))
+        with serving(server) as endpoint:
+            client = socket.create_connection(server.server_address)
+            try:
+                client.sendall(b'GET /tester/go/example.com/module/@v/v1.0.0.mod HTTP/1.1\r\nHost: gateway\r\n\r\n')
+                assert entered.wait(2)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+            finally:
+                client.close()
+                release.set()
+            assert counted.wait(2)
+            assert json.load(urlopen(endpoint + '/status'))['infrastructure_errors']['tester'] == 1
+
+
+def test_proxy_failure_invalidates_preparation_before_gateway_counts_it(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    from loopsbench.dependencies.runtime import DependencyRuntime
+    runtime = DependencyRuntime(access(), DependencyService(), tmp_path)
+    events = []
+    container = SimpleNamespace(exec_run=lambda argv: SimpleNamespace(
+        exit_code=0, output='\n'.join(json.dumps(e) for e in events).encode()))
+    runtime.manager = SimpleNamespace(_network_controllers={'tester': 'egress'}, _service_container=lambda name: container)
+    runtime.status = lambda: {'instance_id': 'one', 'infrastructure_errors': {'client': 0, 'tester': 0}}
+    before = runtime.checkpoint()
+    events.extend([{'sid': 'unrelated', 'host': 'model.example:443'},
+                   {'sid': 'unrelated', 'level': 'error', 'msg': 'read timeout'}])
+    runtime.check_since(before)  # A model connection is outside dependency accounting.
+
+    def run(*args, **kwargs):
+        events.extend([{'sid': 'dependency', 'host': 'loopsbench-dependencies:8080'},
+                       {'sid': 'dependency', 'level': 'error', 'msg': 'read response: i/o timeout'}])
+        kwargs['stdout'].write('go: checksum request: EOF\n')
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setattr(subprocess, 'run', run)
+    runner = Runner('tester', dependencies=runtime)
+    runner._bootstrapped = True
+    result = runner.run('/workspace')
+    assert result.exit_code == 125
+    assert 'transport' in result.infrastructure_error
+    assert not result.passed and not result.failed
+    assert json.loads((tmp_path / 'transport-errors.json').read_text())[0]['sid'] == 'dependency'

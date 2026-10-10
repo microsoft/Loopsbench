@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from loopsbench.dependencies.config import DependencyAccess, DependencyService
@@ -238,7 +239,7 @@ class DependencyRuntime:
                 "pids_limit": 128, "mem_limit": "768m", "init": True,
                 "volumes": [f"{config_path}:/config.json:ro", f"{data}:/data"],
                 "networks": {"default": {}, NETWORK: {}},
-                "healthcheck": {"test": ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=2)"],
+                "healthcheck": {"test": ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz',timeout=2)"],
                                 "interval": "1s", "timeout": "5s", "retries": 30},
             }
             document.setdefault("networks", {}).setdefault("default", {})
@@ -328,7 +329,7 @@ class DependencyRuntime:
                 container = self.manager._service_container(SERVICE)
                 if container is None:
                     raise RuntimeError("dependency gateway container is missing")
-                result = container.exec_run(["python3", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/status',timeout=3).read().decode())"])
+                result = container.exec_run(["python3", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/status',timeout=3).read().decode())"])
                 if result.exit_code != 0:
                     raise RuntimeError("dependency gateway health request failed")
                 payload = json.loads(result.output)
@@ -346,12 +347,50 @@ class DependencyRuntime:
         except Exception as exc:
             raise DependencyInfrastructureError("dependency gateway unavailable or policy mismatch") from exc
 
-    def checkpoint(self) -> tuple[str, int, int]:
+    def transport_errors(self) -> tuple[str, ...]:
+        """Read trusted proxy evidence, never candidate package-manager output.
+
+        A proxy may close a request before the gateway can record delivery
+        failure. Its own log makes that an infrastructure error immediately.
+        """
+        if self.manager is None:
+            return ()
+        endpoint_host = urlsplit(self.endpoint).hostname
+        errors = []
+        try:
+            for role, name in self.manager._network_controllers.items():
+                container = self.manager._service_container(name)
+                if container is None:
+                    raise RuntimeError("dependency egress controller is missing")
+                result = container.exec_run(["cat", "/tmp/gost.log"])
+                if result.exit_code:
+                    raise RuntimeError("cannot read dependency egress evidence")
+                events = []
+                sessions = set()
+                for line in result.output.decode(errors="replace").splitlines():
+                    try:
+                        event = json.loads(line)
+                        if not isinstance(event, dict) or not event.get("sid"):
+                            continue
+                        events.append(event)
+                        if urlsplit("//" + event.get("host", "")).hostname == endpoint_host:
+                            sessions.add(event["sid"])
+                    except (ValueError, TypeError):
+                        continue
+                errors.extend({"role": role, **event} for event in events
+                              if event.get("level") == "error" and event["sid"] in sessions)
+        except Exception as exc:
+            raise DependencyInfrastructureError("cannot inspect dependency gateway transport") from exc
+        (self.directory / "transport-errors.json").write_text(json.dumps(errors, indent=2))
+        return tuple(sorted(json.dumps(event, sort_keys=True) for event in errors))
+
+    def checkpoint(self) -> tuple[str, int, int, tuple[str, ...]]:
         status = self.status()
         # A submitted lockfile can contain a URL copied from the client's
         # registry view. Route labels are not authenticated caller identities.
         # Conservatively invalidate on either counter while a test is running.
-        return status["instance_id"], status["infrastructure_errors"]["client"], status["infrastructure_errors"]["tester"]
+        return (status["instance_id"], status["infrastructure_errors"]["client"],
+                status["infrastructure_errors"]["tester"], self.transport_errors())
 
     def record_service(self):
         status = self.status()
@@ -361,9 +400,9 @@ class DependencyRuntime:
             record["image_id"] = self.manager._service_container(SERVICE).attrs["Image"]
         (self.directory / "service.json").write_text(json.dumps(record, indent=2))
 
-    def check_since(self, before: tuple[str, int, int]):
+    def check_since(self, before: tuple[str, int, int, tuple[str, ...]]):
         if self.checkpoint() != before:
-            raise DependencyInfrastructureError("dependency upstream/cache failed during snapshot evaluation; result is not test evidence")
+            raise DependencyInfrastructureError("dependency upstream/cache/transport failed during snapshot evaluation; result is not test evidence")
 
     def prepare_argv(self, workspace: str) -> list[str]:
         return ["timeout", "--signal=TERM", "--kill-after=5s", str(self.access.prepare_timeout_sec),

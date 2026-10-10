@@ -79,7 +79,29 @@ Agent setup has two optional hooks. `install(session, logging_dir)` runs once pe
 
 The gateway supports **PyPI, Go modules, npm, Cargo sparse registries, Maven repositories (including Gradle plugins), NuGet v3 flat containers, and configured apt repositories**. Package access and snapshot installation are separate: enabling a protocol does not require its package manager in every task image. Ordinary dependency packages and versions need no individual approval. Target package identities and aliases are blocked by trusted task policy.
 
-Enable access per task. Existing task directories need no edits when using run-file overrides:
+Published tasks should declare their dependency policy in `task.yaml` so a normal CLI run needs no separate dependency configuration:
+
+```yaml
+# task.yaml (alongside instruction, timeouts, etc.)
+dependency_access:
+  mode: managed
+  ecosystems: [maven]
+  prepare: [] # The task's trusted test runner performs the build.
+  blocked_packages:
+    maven: [com.example:target-project]
+dependency_service:
+  maven_repository_urls:
+    - https://repo.maven.apache.org/maven2
+    - https://repo.jenkins-ci.org/public
+  maven_artifact_hosts:
+    - repo.maven.apache.org
+    - repo.jenkins-ci.org
+    - jfrog-prod-use1-shared-virginia-main.s3.amazonaws.com
+```
+
+`dependency_access` enables managed access; `dependency_service` alone does not. Omit `dependency_service` when the built-in registries suffice. Service settings resolve independently for each task: explicit run-file fields override task fields, which override built-in defaults. Lists and mappings are replaced as whole fields. For example, a run setting only `provider: docker` or a download concurrency limit preserves task-specific Maven repositories; an explicit `maven_repository_urls` replaces that list. Keep machine-specific cache/replay paths and external gateway endpoints in run configuration.
+
+For experiments or older tasks, run-file overrides remain available:
 
 ```yaml
 # run.yaml
@@ -106,7 +128,19 @@ task_dependency_overrides:
     prepare_timeout_sec: 600
 ```
 
-The same policy may be placed under `dependency_access` in `task.yaml`. A run-file override replaces that task's policy. `mode: disabled` retains the ordinary network plan. Include the target's actual published identities and known aliases, including publications in other ecosystems, in `blocked_packages`; these trusted values never come from candidate-edited manifests. Python names are normalized; Cargo treats hyphens/underscores as aliases; NuGet and npm identities are case-normalized. Maven identities use `groupId:artifactId`. A blocked Go module also blocks submodules and `/v2`, `/v3`, etc. Go toolchain module downloads are blocked. apt checks binary and source package names before delivering `.deb` files.
+A run-file `task_dependency_overrides` entry replaces that task's entire `dependency_access` policy. `mode: disabled` retains the ordinary network plan. Include the target's actual published identities and known aliases, including publications in other ecosystems, in `blocked_packages`; these trusted values never come from candidate-edited manifests. Python names are normalized; Cargo treats hyphens/underscores as aliases; NuGet and npm identities are case-normalized. Maven identities use `groupId:artifactId`. A blocked Go module also blocks submodules and `/v2`, `/v3`, etc. Go toolchain module downloads are blocked. apt checks binary and source package names before delivering `.deb` files.
+
+To reject unlisted forks and other packages, additionally provide `allowed_packages` with an exact identity list for **every** enabled ecosystem (an empty list denies that ecosystem's packages). The list comes from trusted task authoring/review, including the required transitive dependencies, and never expands from a solver's manifest or from live registry metadata. Versions are unrestricted within approved identities, so dependency upgrades remain possible. New package identities, including Go major-version module paths, need a trusted policy update. Target denials take precedence, and authorization is checked before serving cached bytes. Omitting `allowed_packages` retains the original blacklist-only behavior and does not block unknown forks. Approved distributions can still contain arbitrary source; this is identity authorization, not a content-provenance guarantee.
+
+```yaml
+task_dependency_overrides:
+  example_task:
+    ecosystems: [go]
+    blocked_packages:
+      go: [github.com/example/target]
+    allowed_packages:
+      go: [github.com/google/uuid]
+```
 
 Omit `ecosystems` to enable all supported protocols. `prepare` defaults to detecting root manifests; set it explicitly to select installation plugins, or `[]` for protocol access without automatic installation. Use `projects` to name subdirectories in mixed-language/monorepo tasks (Python retains its `python` configuration; Go also accepts `go_modules`):
 
@@ -129,11 +163,13 @@ Before each direct or regression test, the harness copies the snapshot, clears t
 - Python: create a fresh virtual environment without system site packages, install the submitted project and configured requirements, then run the task tests in that environment. The image needs Python with `venv`/`ensurepip`. Install build requirements through the gateway; retain required native compilers and OS libraries in the image. The local project is installed before test tools so a dependency on the target project can resolve locally.
 - Go: clear the tester module/build caches, download the submitted modules, and record the selected module graph. Use the gateway for module files and signed `sum.golang.org` records, with no direct VCS or automatic toolchain fallback. The image needs Go, Python 3 for the trusted launcher, and the required compiler/toolchain.
 
-- npm: remove project `node_modules` and the managed npm cache, then use `npm ci` when a lockfile exists or `npm install` otherwise. Preserve lockfile integrity and route normal registry downloads through the gateway; audit/funding calls are disabled. Yarn/pnpm-specific lockfile installation is not an automatic plugin.
+- npm: remove project `node_modules` and the managed npm cache, then use `npm ci` when a lockfile exists or `npm install` otherwise. The default `npm.install_mode: locked` rejects a manifest/lockfile mismatch. Trusted task/run policies can explicitly select `npm.install_mode: update` for legacy upgrade tasks: run `npm install` against the submitted manifest and seed lockfile, updating only the disposable tester copy. The candidate snapshot is unchanged; the selected dependency tree is recorded. `npm.legacy_peer_deps: true` opts into npm's legacy peer handling. Artifact integrity checks and gateway restrictions apply in both modes; audit/funding calls are disabled and npm uses at most 8 sockets by default. Yarn/pnpm-specific lockfile installation is not an automatic plugin.
 - Cargo: use a fresh Cargo home and target directory, replace crates.io with the gateway sparse registry, then run `cargo fetch` and `cargo metadata`. Retain the image's rustup toolchains and override inherited offline mode for managed access.
 - Maven: clear managed local repository and module `target` directories; run `dependency:resolve` for test scope. For multi-module reactors, build/install submitted sibling modules locally with test compilation/execution skipped, so resolution does not fetch their published counterparts. Mirror repositories through the gateway; lifecycle plugins may download additional artifacts during testing.
 - Gradle: clear managed Gradle home and module build state; run `gradle dependencies`. An init script configures dependency and plugin repositories. Use an installed Gradle 7+ compatible with the task; this does not automatically authorize wrapper distribution downloads.
 - NuGet: use fresh package/HTTP caches, clear project `bin`/`obj`, then run `dotnet restore` using only the gateway source. Disable NuGet audit network requests; preserve normal package integrity/signature verification.
+
+With `npm.legacy_peer_deps: true`, npm can install successfully while `npm ls --all` reports `ELSPROBLEMS` for ignored peers. The harness records that complete diagnostic tree and explicitly logs the compatibility decision, then requires `npm ls --depth=0` to validate direct requirements. A successful installation is still mandatory. This opt-in mode does not require a clean transitive `npm ls` inventory; other inventory errors and direct dependency failures remain fatal. Default strict mode requires the complete inventory to pass.
 
 Images need the selected package managers/toolchains, Python 3 for the launcher, Bash and `timeout`. `rsync` is optional (snapshot copying falls back to `cp`). Solver and tester installations remain separate; only gateway download bytes are shared. Preparation logs are separate from scored output. Build/install hooks run as untrusted code in the restricted tester, never in the unrestricted agent preparation phase. Manifests may change versions, but cannot authorize a new upstream host.
 
@@ -155,6 +191,12 @@ When apt access has configured repositories, each test recreates the tester cont
 The gateway exposes package-specific metadata and download routes, not arbitrary URLs, search, uploads, or a general HTTP proxy. It checks policy before every cache lookup and checks upstream redirects against operator-configured artifact hosts. This controls package identities and access channels; legitimate dependency distributions can still contain source code.
 
 Each trial's host-only `dependencies/` directory (beside `logs/`, which legacy tasks may mount) contains the effective policy, service image ID, preparation logs with selected versions, and gateway data. It is never mounted as a directory into client/tester; only specific runtime configuration files are mounted read-only. `data/resolution.json` maps requested upstream resources to SHA256-addressed blobs; metadata/version lists and 404 results are frozen on first use for that trial. `data/requests.jsonl` records accepted/rejected requests. Gateway health checks do not certify availability of every upstream. A gateway/upstream/cache error during a test is reported as `dependency_infrastructure_error`, never counted as a passing test or a regression transition, and never triggers unrestricted fallback. An unavailable package version (404), blocked dependency (403), or invalid manifest is a candidate failure instead.
+
+The gateway downloads independent resources concurrently (`dependency_service.max_concurrent_downloads`, default 4), while concurrent requests for the same resource and representation share one upstream fetch. `max_concurrent_requests` (default 4) also bounds the entire request lifetime, including cached metadata decoding, rewriting and delivery; limiting downloads alone does not bound this memory use. npm has a tighter `max_concurrent_npm_requests` limit (default 2). At most `max_pending_requests` (default 32) additional handlers can wait; excess connections wait in the TCP backlog rather than immediately receiving 503. Queue waits use `request_timeout_sec`. The Docker gateway has a separate loopback-only health/status listener on port 8081 so package bursts cannot starve its control checks. npm requests the abbreviated install metadata representation, bounded by `max_npm_metadata_bytes` (default 16 MiB) before JSON parsing. Cache keys include the Accept representation, so replaying a cache captured before this change may require recapturing npm metadata.
+
+The transparent proxy allows up to 330 seconds for response headers, covering the gateway's configurable upstream timeout; the task's total evaluation timeout still applies. The egress image builds pinned GOST sources including the per-request HTTP Host/HTTP2 authority authorization fix; a newer image date alone does not establish that the fix is present. Broken response delivery and gateway connection failures in the trusted proxy logs also invalidate the evaluation. Proxy evidence is saved in `dependencies/transport-errors.json`, independently of candidate output.
+
+The DNS snapshot closes ordinary external DNS queries in restricted task containers, and explicit package identity allowlists reject unlisted forks. Model endpoint access remains host-based: arbitrary API paths on an authorized host are reachable, and TLS request bodies are not inspected. Provider-hosted search and host-side tools/MCP are outside this boundary. This configuration provides ordinary phase-based networking plus controlled dependency downloads; it does not certify complete search isolation.
 
 Replay the captured dependency universe without contacting upstreams:
 

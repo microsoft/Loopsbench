@@ -4,6 +4,8 @@ import base64
 import gzip
 import hashlib
 import json
+import shutil
+import subprocess
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -110,6 +112,94 @@ def test_npm_rejects_cross_host_metadata_urls_and_search(tmp_path, registry):
             g.route("/client/npm" + path)
 
 
+def test_npm_metadata_limit_is_enforced_before_decoding(tmp_path, registry):
+    registry[1]['/npm/sample'] = 200, {}, b' ' * 2048
+    g = gateway(tmp_path, registry, max_npm_metadata_bytes=1024)
+    with pytest.raises(GatewayError, match='exceeded artifact limit'):
+        g.route('/tester/npm/sample')
+    assert not g.index
+
+
+@pytest.mark.skipif(shutil.which('npm') is None, reason='requires npm')
+def test_npm_snapshot_upgrade_requires_explicit_lock_update(tmp_path, registry, monkeypatch):
+    import io
+    import tarfile
+
+    import loopsbench.dependencies.prepare as preparation
+
+    metadata = None
+    for version in ['1.0.0', '2.0.0']:
+        body = io.BytesIO()
+        with tarfile.open(fileobj=body, mode='w:gz') as archive:
+            content = json.dumps({'name': 'sample', 'version': version}).encode()
+            entry = tarfile.TarInfo('package/package.json')
+            entry.size = len(content)
+            archive.addfile(entry, io.BytesIO(content))
+        item = add_npm(registry, 'sample', version, body.getvalue())
+        if metadata is None:
+            metadata = item
+        else:
+            metadata['versions'].update(item['versions'])
+    registry[1]['/npm/sample'] = 200, {}, json.dumps(metadata).encode()
+    g = gateway(tmp_path, registry)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    manifest = workspace / 'package.json'
+    manifest.write_text(json.dumps({'name': 'local-app', 'version': '1.0.0', 'dependencies': {'sample': '1.0.0'}}))
+    monkeypatch.setattr(preparation, 'STATE', tmp_path / 'state')
+    access = policy(ecosystems=['npm'], prepare=['npm'])
+    with serving(make_server(g, ('127.0.0.1', 0))) as endpoint:
+        config = {'access': access.model_dump(), 'endpoint': endpoint}
+        preparation.prepare(config, workspace)
+        lock = (workspace / 'package-lock.json').read_bytes()
+        manifest.write_text(json.dumps({'name': 'local-app', 'version': '1.0.0', 'dependencies': {'sample': '2.0.0'}}))
+        with pytest.raises(subprocess.CalledProcessError):
+            preparation.prepare(config, workspace)
+        assert (workspace / 'package-lock.json').read_bytes() == lock
+        assert not (workspace / 'node_modules').exists()
+        config['access']['npm']['install_mode'] = 'update'
+        preparation.prepare(config, workspace)
+        installed = json.loads((workspace / 'node_modules/sample/package.json').read_text())
+        assert installed['version'] == '2.0.0'
+        assert json.loads((workspace / 'package-lock.json').read_text())['packages']['node_modules/sample']['version'] == '2.0.0'
+
+
+@pytest.mark.skipif(shutil.which('npm') is None, reason='requires npm')
+def test_npm_legacy_peer_inventory_keeps_direct_validation(tmp_path, registry, monkeypatch, capsys):
+    import io
+    import tarfile
+
+    import loopsbench.dependencies.prepare as preparation
+
+    package = {'name': 'sample', 'version': '1.0.0', 'peerDependencies': {'unavailable-peer': '^1.0.0'}}
+    body = io.BytesIO()
+    with tarfile.open(fileobj=body, mode='w:gz') as archive:
+        content = json.dumps(package).encode()
+        entry = tarfile.TarInfo('package/package.json')
+        entry.size = len(content)
+        archive.addfile(entry, io.BytesIO(content))
+    metadata = add_npm(registry, 'sample', '1.0.0', body.getvalue())
+    metadata['versions']['1.0.0']['peerDependencies'] = package['peerDependencies']
+    registry[1]['/npm/sample'] = 200, {}, json.dumps(metadata).encode()
+    g = gateway(tmp_path, registry)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    (workspace / 'package.json').write_text(json.dumps({
+        'name': 'local-app', 'version': '1.0.0', 'dependencies': {'sample': '1.0.0'}}))
+    monkeypatch.setattr(preparation, 'STATE', tmp_path / 'state')
+    access = policy(ecosystems=['npm'], prepare=['npm'], npm={'legacy_peer_deps': True})
+    with serving(make_server(g, ('127.0.0.1', 0))) as endpoint:
+        config = {'access': access.model_dump(), 'endpoint': endpoint}
+        preparation.prepare(config, workspace)
+        assert 'LOOPSBENCH_NPM_LEGACY_INVENTORY' in capsys.readouterr().out
+        env = preparation.runtime_environment(config, 'tester')
+        with pytest.raises(subprocess.CalledProcessError):
+            preparation.record_npm_dependencies(workspace, env)
+        shutil.rmtree(workspace / 'node_modules/sample')
+        with pytest.raises(subprocess.CalledProcessError):
+            preparation.record_npm_dependencies(workspace, env, legacy_peer_deps=True)
+
+
 def test_cargo_sparse_index_crate_checksums_and_alias_block(tmp_path, registry):
     blob = b"crate bytes"
     row = {"name": "sample", "vers": "1.2.3", "deps": [], "features": {}, "yanked": False,
@@ -128,11 +218,23 @@ def test_cargo_sparse_index_crate_checksums_and_alias_block(tmp_path, registry):
 
 
 @pytest.mark.parametrize("suffix", ["1.0/target-1.0.pom", "1.0/target-1.0-sources.jar", "maven-metadata.xml",
-                                    "1.0-SNAPSHOT/maven-metadata.xml.sha256", "1.0/target-1.0.jar.sha1"])
+                                    "1.0-SNAPSHOT/maven-metadata.xml.sha256", "1.0/target-1.0.jar.sha1",
+                                    "1.0/target-1.0-net4.exe", "1.0/target-1.0-net4.exe.sha256"])
 def test_maven_blocks_target_for_all_classifiers_and_metadata(tmp_path, registry, suffix):
     with pytest.raises(PermissionError):
         gateway(tmp_path, registry).route("/tester/maven/org/example/target/" + suffix)
     assert registry[2] == {}
+
+
+def test_maven_executable_dependency_and_checksum(tmp_path, registry):
+    path = "/com/sun/winsw/winsw/2.9.0/winsw-2.9.0-net4.exe"
+    registry[1]["/plugins" + path] = 200, {}, b"executable dependency"
+    registry[1]["/plugins" + path + ".sha256"] = 200, {}, b"checksum"
+    g = gateway(tmp_path, registry)
+    assert g.route("/tester/maven" + path)[0] == b"executable dependency"
+    assert g.route("/tester/maven" + path + ".sha256")[0] == b"checksum"
+    with pytest.raises(GatewayError, match="unknown Maven artifact type"):
+        g.route("/tester/maven" + path + ".html")
 
 
 def test_maven_mirrors_fallback_only_on_missing_artifacts(tmp_path, registry):

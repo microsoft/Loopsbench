@@ -60,4 +60,7 @@ def check_package(policy: dict, ecosystem: str, name: str) -> str:
             compared_item = "/".join(part.removesuffix(".git") for part in item.lower().split("/"))
         if compared_name == compared_item or (ecosystem == "go" and compared_name.startswith(compared_item + "/")):
             raise PermissionError("package is blocked by task policy")
+    allowed = policy.get("allowed_packages")
+    if allowed is not None and name not in allowed.get(ecosystem, []):
+        raise PermissionError("package is not in the trusted dependency identity list")
     return name

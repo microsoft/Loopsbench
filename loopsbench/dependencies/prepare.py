@@ -57,7 +57,9 @@ def runtime_environment(config: dict, role: str, current=None) -> dict[str, str]
     if "npm" in ecosystems:
         env.update(NPM_CONFIG_REGISTRY=endpoint + "/npm/", NPM_CONFIG_CACHE=str(state / "npm-cache"),
                    NPM_CONFIG_USERCONFIG=str(state / "npmrc"), NPM_CONFIG_AUDIT="false",
-                   NPM_CONFIG_FUND="false", NPM_CONFIG_UPDATE_NOTIFIER="false", NPM_CONFIG_REPLACE_REGISTRY_HOST="npmjs")
+                   NPM_CONFIG_FUND="false", NPM_CONFIG_UPDATE_NOTIFIER="false", NPM_CONFIG_REPLACE_REGISTRY_HOST="npmjs",
+                   NPM_CONFIG_MAXSOCKETS="8",
+                   NPM_CONFIG_LEGACY_PEER_DEPS=str(config["access"].get("npm", {}).get("legacy_peer_deps", False)).lower())
     if "cargo" in ecosystems:
         env.update(CARGO_HOME=str(state / "cargo"), CARGO_TARGET_DIR=str(state / "cargo-target"),
                    CARGO_NET_OFFLINE="false")
@@ -196,6 +198,26 @@ def remove_state(path):
         path.unlink()
 
 
+def record_npm_dependencies(project, env, legacy_peer_deps=False):
+    # npm ls still reports ignored transitive peers after a successful legacy
+    # install (even with --omit=peer). Keep the complete diagnostic inventory.
+    argv = ["npm", "ls", "--all", "--json"]
+    result = subprocess.run(argv, cwd=project, env=env, stdout=subprocess.PIPE, text=True)
+    print(result.stdout, end="", flush=True)
+    if result.returncode:
+        try:
+            problem = json.loads(result.stdout).get("error", {}).get("code")
+        except (ValueError, AttributeError):
+            problem = None
+        if not (legacy_peer_deps and result.returncode == 1 and problem == "ELSPROBLEMS"):
+            raise subprocess.CalledProcessError(result.returncode, argv)
+        print("LOOPSBENCH_NPM_LEGACY_INVENTORY: transitive tree diagnostics retained; "
+              "installation and direct dependency validation remain required", flush=True)
+        # npm install remains mandatory and fatal on failure. Validate the
+        # submitted direct requirements independently of ignored peer edges.
+        subprocess.run(["npm", "ls", "--depth=0", "--json"], cwd=project, env=env, check=True)
+
+
 def prepare(config: dict, workspace: Path):
     remove_state(STATE)
     STATE.mkdir(parents=True, mode=0o700)
@@ -238,9 +260,12 @@ def prepare(config: dict, workspace: Path):
             print("LOOPSBENCH_DEPENDENCY_RESOLUTION " + plugin + " " + relative, flush=True)
             if plugin == "npm":
                 remove_state(project / "node_modules")
-                run(["npm", "ci" if (project / "package-lock.json").exists() or (project / "npm-shrinkwrap.json").exists() else "install",
-                     "--no-audit", "--no-fund"], cwd=project)
-                run(["npm", "ls", "--all", "--json"], cwd=project)
+                settings = access.get("npm", {})
+                locked = settings.get("install_mode", "locked") == "locked" and (
+                    (project / "package-lock.json").exists() or (project / "npm-shrinkwrap.json").exists())
+                options = ["--legacy-peer-deps"] if settings.get("legacy_peer_deps") else []
+                run(["npm", "ci" if locked else "install", "--no-audit", "--no-fund", *options], cwd=project)
+                record_npm_dependencies(project, env, settings.get("legacy_peer_deps", False))
             elif plugin == "cargo":
                 snapshot_path(workspace, str((project / "Cargo.toml").relative_to(workspace)))
                 run(["cargo", "fetch", "--manifest-path", str(project / "Cargo.toml")], cwd=project)

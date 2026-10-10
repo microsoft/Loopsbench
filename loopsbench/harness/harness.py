@@ -31,7 +31,11 @@ from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
 from loopsbench.config import config as loopsbench_config
 from loopsbench.dataset.dataset import Dataset
-from loopsbench.dependencies.config import DependencyAccess, DependencyService
+from loopsbench.dependencies.config import (
+    DependencyAccess,
+    DependencyService,
+    resolve_dependency_service,
+)
 from loopsbench.handlers.trial_handler import TrialHandler
 from loopsbench.harness.instruction_composer import compose_instruction
 from loopsbench.harness.models import (
@@ -1395,7 +1399,7 @@ PY
             task_dir=handler.task_dir.resolve(),
             network=self._network,
             dependency_access=self._task_dependency_overrides.get(handler.task_id, handler.task.dependency_access),
-            dependency_service=self._dependency_service,
+            dependency_service=resolve_dependency_service(handler.task.dependency_service, self._dependency_service),
         )
         with ExitStack() as stack:
             try:

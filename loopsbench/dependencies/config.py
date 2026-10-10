@@ -96,17 +96,28 @@ def validate_relative_path(value: str) -> str:
     return value
 
 
+class NpmPreparation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Explicit opt-in for legacy upgrade tasks whose lockfile is only a seed.
+    install_mode: Literal["locked", "update"] = "locked"
+    legacy_peer_deps: bool = False
+
+
 class DependencyAccess(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: Literal["managed", "disabled"] = "managed"
     ecosystems: list[Ecosystem] = Field(default_factory=lambda: list(ECOSYSTEMS))
     blocked_packages: dict[Ecosystem, list[str]] = Field(default_factory=dict)
+    # A trusted identity list permits version upgrades without exposing every
+    # registry package/fork. None retains the original blacklist-only mode.
+    allowed_packages: dict[Ecosystem, list[str]] | None = None
     # None detects root manifests. Explicit [] exposes protocols without an
     # automatic install. Enabling a protocol never requires that tool installed.
     prepare: list[Preparation] | None = None
     projects: dict[Preparation, list[str]] = Field(default_factory=dict)
     sources: dict[str, TrustedSource] = Field(default_factory=dict)
     python: PythonPreparation = Field(default_factory=PythonPreparation)
+    npm: NpmPreparation = Field(default_factory=NpmPreparation)
     go_modules: list[str] = Field(default_factory=lambda: ["."])
     prepare_timeout_sec: int = Field(default=600, ge=1, le=3600)
 
@@ -127,6 +138,12 @@ class DependencyAccess(BaseModel):
         for ecosystem, packages in self.blocked_packages.items():
             for package in packages:
                 canonical_package(ecosystem, package)
+        if self.allowed_packages is not None:
+            if set(self.allowed_packages) != set(self.ecosystems):
+                raise ValueError("allowed_packages must declare every enabled ecosystem, including empty lists")
+            for ecosystem, packages in self.allowed_packages.items():
+                for package in packages:
+                    canonical_package(ecosystem, package)
         for kind in [*(self.prepare or []), *self.projects]:
             if ("maven" if kind == "gradle" else kind) not in self.ecosystems:
                 raise ValueError(f"preparation plugin {kind} requires its package protocol enabled")
@@ -150,6 +167,11 @@ class DependencyAccess(BaseModel):
         }}
         if self.sources:
             policy["sources"] = {name: source.model_dump() for name, source in sorted(self.sources.items())}
+        if self.allowed_packages is not None:
+            policy["allowed_packages"] = {
+                kind: sorted({canonical_package(kind, name) for name in names})
+                for kind, names in sorted(self.allowed_packages.items())
+            }
         return policy
 
     def policy_digest(self) -> str:
@@ -181,6 +203,11 @@ class DependencyService(BaseModel):
     apt_repositories: dict[str, AptRepository] = Field(default_factory=dict)
     allow_insecure_upstreams: bool = False
     request_timeout_sec: int = Field(default=45, ge=1, le=300)
+    max_concurrent_downloads: int = Field(default=4, ge=1, le=32)
+    max_concurrent_requests: int = Field(default=4, ge=1, le=16)
+    max_concurrent_npm_requests: int = Field(default=2, ge=1, le=8)
+    max_pending_requests: int = Field(default=32, ge=1, le=64)
+    max_npm_metadata_bytes: int = Field(default=16 * 1024 * 1024, ge=1024)
     max_artifact_bytes: int = Field(default=256 * 1024 * 1024, ge=1024)
     max_cache_bytes: int = Field(default=4 * 1024**3, ge=1024)
     # Optional prior gateway data directory. Copy it; never mount it writable in
@@ -218,6 +245,20 @@ class DependencyService(BaseModel):
                 raise ValueError("artifact hosts must be exact hostnames")
             NetworkPolicy.validate_hosts([host])
         return self
+
+
+def resolve_dependency_service(
+    task: DependencyService | None, run: DependencyService | None,
+) -> DependencyService:
+    """Use task defaults, then apply only explicitly supplied run settings.
+
+    Resolve each trial independently so task repositories never leak into other
+    tasks. Lists and mappings are replaced as whole fields, not combined.
+    """
+    values = task.model_dump(exclude_unset=True) if task is not None else {}
+    if run is not None:
+        values.update(run.model_dump(exclude_unset=True))
+    return DependencyService.model_validate(values)
 
 
 def dependency_network(plan: NetworkPlan, access: DependencyAccess, endpoint: str) -> NetworkPlan:

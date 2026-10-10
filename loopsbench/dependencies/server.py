@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import Future
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -49,6 +51,10 @@ class Gateway:
         data.mkdir(parents=True, exist_ok=True)
         (data / "blobs").mkdir(exist_ok=True)
         self.lock = threading.RLock()
+        self.inflight: dict[str, Future] = {}
+        self.download_slots = threading.BoundedSemaphore(self.service.get("max_concurrent_downloads", 4))
+        self.request_slots = threading.BoundedSemaphore(self.service.get("max_concurrent_requests", 4))
+        self.npm_slots = threading.BoundedSemaphore(self.service.get("max_concurrent_npm_requests", 2))
         self.index_path = data / "resolution.json"
         self.index = json.loads(self.index_path.read_text()) if self.index_path.exists() else {}
         self.errors = {"client": 0, "tester": 0}
@@ -79,53 +85,96 @@ class Gateway:
             with (self.data / "requests.jsonl").open("a") as stream:
                 stream.write(json.dumps({"time": time.time(), "role": role, "path": path[:2048], "status": status}) + "\n")
 
-    def fetch(self, url: str, hosts: list[str], *, digest: str | None = None) -> bytes:
+    def fetch(self, url: str, hosts: list[str], *, digest: str | None = None,
+              accept: str | None = None, max_bytes: int | None = None) -> bytes:
         """Freeze every successful response (including version lists) per run.
 
         Callers MUST authorize the package before reaching this shared cache.
         URLs originate only in fixed protocol routes or checked registry data.
         """
+        key = url if accept is None else url + "#accept=" + quote(accept, safe="")
+        limit = min(max_bytes or self.service["max_artifact_bytes"], self.service["max_artifact_bytes"])
         with self.lock:
-            if url in self.index:
-                record = self.index[url]
-                if record.get("status") == 404:
-                    raise GatewayError(404, "package/version not found")
-                body = (self.data / "blobs" / record["sha256"]).read_bytes()
-                actual = hashlib.sha256(body).hexdigest()
-                if actual != record["sha256"] or (digest and actual != digest):
-                    raise GatewayError(502, "cached artifact hash mismatch")
-                return body
-            if self.service.get("replay_from"):
+            record = self.index.get(key)
+            if record is None and self.service.get("replay_from"):
                 raise GatewayError(503, "frozen dependency replay has no record for this request")
+            pending = self.inflight.get(key)
+            owner = record is None and pending is None
+            if owner:
+                pending = self.inflight[key] = Future()
+        if record is not None:
+            if record.get("status") == 404:
+                raise GatewayError(404, "package/version not found")
+            blob = self.data / "blobs" / record["sha256"]
+            if blob.stat().st_size > limit:
+                raise GatewayError(502, "cached response exceeded artifact limit")
+            body = blob.read_bytes()
+            if hashlib.sha256(body).hexdigest() != record["sha256"]:
+                raise GatewayError(502, "cached artifact hash mismatch")
+        elif not owner:
+            # Coalesce the same URL so mutable metadata is frozen consistently.
+            body = pending.result()
+        else:
+            try:
+                body = self._download(url, hosts, digest=digest, key=key, accept=accept, limit=limit)
+                pending.set_result(body)
+            except Exception as exc:
+                pending.set_exception(exc)
+                raise
+            finally:
+                with self.lock:
+                    del self.inflight[key]
+        if len(body) > limit:
+            raise GatewayError(502, "response exceeded artifact limit")
+        if digest and hashlib.sha256(body).hexdigest() != digest:
+            raise GatewayError(502, "cached artifact hash mismatch")
+        return body
+
+    def _download(self, url: str, hosts: list[str], *, digest: str | None,
+                  key: str, accept: str | None, limit: int) -> bytes:
+        # Neither slow upstream I/O nor waiting for a download slot may hold
+        # the index/status lock. Health checks and cache hits stay responsive.
+        if not self.download_slots.acquire(timeout=self.service["request_timeout_sec"]):
+            raise GatewayError(503, "dependency download queue timed out")
+        try:
             parsed = urlsplit(url)
             allowed = {*hosts, parsed.hostname}
             opener = build_opener(ProxyHandler({}), CheckedRedirect(allowed, self.service["allow_insecure_upstreams"]))
             try:
-                request = Request(url, headers={"User-Agent": "LoopsBench-Dependency-Gateway/1", "Accept-Encoding": "identity"})
+                headers = {"User-Agent": "LoopsBench-Dependency-Gateway/1", "Accept-Encoding": "identity"}
+                if accept is not None:
+                    headers["Accept"] = accept
+                request = Request(url, headers=headers)
                 with opener.open(request, timeout=self.service["request_timeout_sec"]) as response:
-                    body = response.read(self.service["max_artifact_bytes"] + 1)
-                if len(body) > self.service["max_artifact_bytes"]:
+                    body = response.read(limit + 1)
+                if len(body) > limit:
                     raise GatewayError(502, "upstream response exceeded artifact limit")
             except HTTPError as exc:
                 if exc.code in {404, 410}:
-                    self.index[url] = {"status": 404}
-                    self._atomic_json(self.index_path, self.index)
+                    with self.lock:
+                        self.index[key] = {"status": 404}
+                        self._atomic_json(self.index_path, self.index)
                     raise GatewayError(404, "package/version not found") from None
                 raise GatewayError(502, "package upstream HTTP failure") from None
-            except (URLError, OSError, TimeoutError):
+            except (URLError, OSError, HTTPException):
                 raise GatewayError(502, "package upstream unavailable") from None
             actual = hashlib.sha256(body).hexdigest()
             if digest and actual != digest:
                 raise GatewayError(502, "registry artifact hash mismatch")
-            blob = self.data / "blobs" / actual
-            if not blob.exists():
-                if self.total + len(body) > self.service["max_cache_bytes"]:
-                    raise GatewayError(507, "dependency cache capacity exceeded")
-                blob.write_bytes(body)
-                self.total += len(body)
-            self.index[url] = {"sha256": actual, "size": len(body), "status": 200}
-            self._atomic_json(self.index_path, self.index)
+            with self.lock:
+                blob = self.data / "blobs" / actual
+                if not blob.exists():
+                    if self.total + len(body) > self.service["max_cache_bytes"]:
+                        raise GatewayError(507, "dependency cache capacity exceeded")
+                    temporary = blob.with_suffix(".tmp")
+                    temporary.write_bytes(body)
+                    temporary.replace(blob)
+                    self.total += len(body)
+                self.index[key] = {"sha256": actual, "size": len(body), "status": 200}
+                self._atomic_json(self.index_path, self.index)
             return body
+        finally:
+            self.download_slots.release()
 
     def python_files(self, package: str) -> list[dict]:
         package = check_package(self.policy, "python", package)
@@ -213,9 +262,41 @@ class Gateway:
         raise GatewayError(404, "unknown package protocol route")
 
 
-def make_server(gateway: Gateway, address=("0.0.0.0", 8080)):
+def make_server(gateway: Gateway, address=("0.0.0.0", 8080), *, control_only=False):
     class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(gateway.service["request_timeout_sec"])
+
         def do_GET(self):
+            # Bound the entire allocation lifetime, including cached JSON
+            # decoding, URL rewriting and delivery, not only upstream I/O.
+            acquired = False
+            npm_acquired = False
+            try:
+                if control_only and self.path not in {"/healthz", "/status"}:
+                    self.send_error(404)
+                    return
+                if self.path not in {"/healthz", "/status"}:
+                    acquired = gateway.request_slots.acquire(timeout=gateway.service["request_timeout_sec"])
+                    if acquired and re.match(r"/(client|tester)/npm/", unquote(self.path)):
+                        npm_acquired = gateway.npm_slots.acquire(timeout=gateway.service["request_timeout_sec"])
+                        if not npm_acquired:
+                            gateway.request_slots.release()
+                            acquired = False
+                    if not acquired:
+                        role = "tester" if self.path.startswith("/tester/") else "client"
+                        gateway.audit(role, self.path, 503)
+                        self.send_error(503, "dependency request queue timed out")
+                        return
+                self.deliver()
+            finally:
+                if npm_acquired:
+                    gateway.npm_slots.release()
+                if acquired:
+                    gateway.request_slots.release()
+
+        def deliver(self):
             role = "tester" if self.path.startswith("/tester/") else "client"
             status = 200
             try:
@@ -233,25 +314,56 @@ def make_server(gateway: Gateway, address=("0.0.0.0", 8080)):
             except Exception:
                 status, body, content_type = 502, b"dependency gateway failed", "text/plain"
             gateway.audit(role, self.path, status)
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
             try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            except OSError:
+                # An upstream success is not a delivered dependency. Count a
+                # broken client/proxy connection separately from HTTP status.
+                gateway.audit(role, self.path, 502)
 
         def log_message(self, *_args):
             pass
 
         do_HEAD = do_GET
 
-    return ThreadingHTTPServer(address, Handler)
+    class Server(ThreadingHTTPServer):
+        request_queue_size = 128
+
+        def __init__(self):
+            self.handlers = threading.BoundedSemaphore(
+                gateway.service.get("max_concurrent_requests", 4) + gateway.service.get("max_pending_requests", 32))
+            super().__init__(address, Handler)
+
+        def process_request(self, request, client_address):
+            # Leave excess connections in the TCP backlog rather than failing
+            # legitimate package-manager bursts or spawning unbounded threads.
+            # The loopback control listener remains independently responsive.
+            self.handlers.acquire()
+            try:
+                super().process_request(request, client_address)
+            except Exception:
+                self.handlers.release()
+                raise
+
+        def process_request_thread(self, request, client_address):
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self.handlers.release()
+
+    return Server()
 
 
 if __name__ == "__main__":
     config = json.loads(Path(sys.argv[1]).read_text())
-    make_server(Gateway(config, Path(sys.argv[2])), ("0.0.0.0", int(sys.argv[3]) if len(sys.argv) > 3 else 8080)).serve_forever()
+    gateway = Gateway(config, Path(sys.argv[2]))
+    port = int(sys.argv[3]) if len(sys.argv) > 3 else 8080
+    control = make_server(gateway, ("127.0.0.1", port + 1), control_only=True)
+    threading.Thread(target=control.serve_forever, daemon=True).start()
+    make_server(gateway, ("0.0.0.0", port)).serve_forever()

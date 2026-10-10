@@ -37,10 +37,12 @@ def test_install_new_version_test_snapshot_rollback_and_network_boundary(tmp_pat
     if language == 'python':
         script.write_text("set -e\npython3 -c \"import importlib.metadata as m; assert m.version('click') == open('expected').read()\"\necho 'tests/test_dependency.py::version PASSED'\n")
         policy = DependencyAccess(ecosystems=['python'], blocked_packages={'python': ['packaging']},
+                                  allowed_packages={'python': ['click']},
                                   python={'project': None, 'requirements_files': ['requirements.txt']})
     else:
         script.write_text("set -e\ngo test -mod=mod ./...\ntest \"$(go list -m -f '{{.Version}}' github.com/google/uuid)\" = \"$(cat expected)\"\necho 'tests/test_dependency.py::version PASSED'\n")
-        policy = DependencyAccess(ecosystems=['go'], blocked_packages={'go': ['github.com/expr-lang/expr']})
+        policy = DependencyAccess(ecosystems=['go'], blocked_packages={'go': ['github.com/expr-lang/expr']},
+                                  allowed_packages={'go': ['github.com/google/uuid']})
     common = {'image': image, 'entrypoint': ['sh', '-c'], 'command': ['mkdir -p /workspace; exec sleep infinity'],
               'working_dir': '/workspace'}
     compose = tmp_path / 'compose.json'
@@ -109,5 +111,55 @@ def test_install_new_version_test_snapshot_rollback_and_network_boundary(tmp_pat
             assert '/config.json' not in destinations
             assert container.exec_run(['sh', '-c', 'echo tampered > /opt/loopsbench-dependency-config.json']).exit_code != 0
             assert container.exec_run(['sh', '-c', 'test ! -e /logs/dependencies/data && test ! -e /logs/dependencies/gateway.json']).exit_code == 0
+    finally:
+        manager.stop()
+
+
+def test_gateway_response_longer_than_old_proxy_deadline(tmp_path):
+    """Exercise the real transparent proxy, including its header deadline."""
+    image = os.environ.get('LOOPSBENCH_TEST_DEPENDENCIES_GO_IMAGE', 'golang:1.26.5-bookworm')
+    project = 'lb-dep-slow-' + uuid.uuid4().hex[:10]
+    upstream = tmp_path / 'upstream.py'
+    upstream.write_text('''from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import time
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        time.sleep(18)
+        body = b'module example.com/dependency\\n\\ngo 1.20\\n'
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+ThreadingHTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+''')
+    common = {'image': image, 'entrypoint': ['sh', '-c'], 'command': ['exec sleep infinity']}
+    compose = tmp_path / 'compose.json'
+    compose.write_text(json.dumps({'services': {
+        'client': {**common, 'container_name': project + '-client'},
+        'tester': {**common, 'container_name': project + '-tester'},
+        'package-upstream': {'image': image, 'entrypoint': ['python3', '/upstream.py']},
+    }}))
+    overlay = tmp_path / 'fixture.compose.json'
+    overlay.write_text(json.dumps({'services': {'package-upstream': {
+        'volumes': [f'{upstream}:/upstream.py:ro'],
+    }}}))
+    manager = DockerComposeManager(
+        client_container_name=project + '-client', client_image_name=image,
+        tester_container_name=project + '-tester', tester_image_name=image,
+        docker_compose_path=[compose, overlay], no_rebuild=True, logs_path=tmp_path / 'logs',
+        network=NetworkPlan(), dependency_access=DependencyAccess(
+            ecosystems=['go'], prepare=[], blocked_packages={'go': ['example.com/target']}),
+        dependency_service=DependencyService(go_proxy_url='http://package-upstream:8080',
+                                              allow_insecure_upstreams=True))
+    try:
+        manager.start()
+        before = manager.dependencies.checkpoint()
+        result = manager.tester_container.exec_run(['python3', '-c',
+            "import urllib.request; "
+            "body = urllib.request.urlopen('http://loopsbench-dependencies:8080/tester/go/example.com/dependency/@v/v1.0.0.mod',timeout=55).read(); "
+            "assert body.startswith(b'module example.com/dependency')"])
+        assert result.exit_code == 0, result.output.decode()
+        manager.dependencies.check_since(before)
+        assert not manager.dependencies.transport_errors()
     finally:
         manager.stop()

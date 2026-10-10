@@ -104,7 +104,9 @@ class RegistryProtocols:
         package = check_package(self.g.policy, "npm", package)
         url = self.s["npm_registry_url"].rstrip("/") + "/" + quote(package, safe="@")
         try:
-            metadata = json.loads(self.g.fetch(url, self.s["npm_artifact_hosts"]))
+            metadata = json.loads(self.g.fetch(
+                url, self.s["npm_artifact_hosts"], accept="application/vnd.npm.install-v1+json",
+                max_bytes=self.s.get("max_npm_metadata_bytes", 16 * 1024 * 1024)))
             if canonical_package("npm", metadata["name"]) != package or not isinstance(metadata["versions"], dict):
                 raise ValueError()
             return metadata
@@ -204,7 +206,7 @@ class RegistryProtocols:
                 raise GatewayError(400, "invalid Maven artifact path")
             artifact, group = parts[-3], ".".join(parts[:-3])
             if not metadata and (not parts[-1].startswith(artifact + "-") or not re.search(
-                    r"\.(?:pom|jar|module|aar|war|zip|klib|tar\.gz)(?:\.(?:sha1|sha256|sha512|md5|asc))?$", parts[-1])):
+                    r"\.(?:pom|jar|module|aar|war|zip|klib|exe|tar\.gz)(?:\.(?:sha1|sha256|sha512|md5|asc))?$", parts[-1])):
                 raise GatewayError(404, "unknown Maven artifact type")
         check_package(self.g.policy, "maven", group + ":" + artifact)
         for upstream in self.s["maven_repository_urls"]:
