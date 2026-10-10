@@ -219,19 +219,24 @@ def test_cargo_sparse_index_crate_checksums_and_alias_block(tmp_path, registry):
 
 @pytest.mark.parametrize("suffix", ["1.0/target-1.0.pom", "1.0/target-1.0-sources.jar", "maven-metadata.xml",
                                     "1.0-SNAPSHOT/maven-metadata.xml.sha256", "1.0/target-1.0.jar.sha1",
-                                    "1.0/target-1.0-net4.exe", "1.0/target-1.0-net4.exe.sha256"])
+                                    "1.0/target-1.0-net4.exe", "1.0/target-1.0-net4.exe.sha256",
+                                    "1.0/target-1.0.signature", "1.0/target-1.0.signature.sha256"])
 def test_maven_blocks_target_for_all_classifiers_and_metadata(tmp_path, registry, suffix):
     with pytest.raises(PermissionError):
         gateway(tmp_path, registry).route("/tester/maven/org/example/target/" + suffix)
     assert registry[2] == {}
 
 
-def test_maven_executable_dependency_and_checksum(tmp_path, registry):
-    path = "/com/sun/winsw/winsw/2.9.0/winsw-2.9.0-net4.exe"
-    registry[1]["/plugins" + path] = 200, {}, b"executable dependency"
+@pytest.mark.parametrize("path", [
+    "/com/sun/winsw/winsw/2.9.0/winsw-2.9.0-net4.exe",
+    "/org/codehaus/mojo/signature/java18/1.0/java18-1.0.signature",
+    "/com/toasttab/android/gummy-bears-api-21/0.10.0/gummy-bears-api-21-0.10.0.signature",
+])
+def test_maven_tooling_dependency_and_checksum(tmp_path, registry, path):
+    registry[1]["/plugins" + path] = 200, {}, b"tooling dependency"
     registry[1]["/plugins" + path + ".sha256"] = 200, {}, b"checksum"
     g = gateway(tmp_path, registry)
-    assert g.route("/tester/maven" + path)[0] == b"executable dependency"
+    assert g.route("/tester/maven" + path)[0] == b"tooling dependency"
     assert g.route("/tester/maven" + path + ".sha256")[0] == b"checksum"
     with pytest.raises(GatewayError, match="unknown Maven artifact type"):
         g.route("/tester/maven" + path + ".html")
