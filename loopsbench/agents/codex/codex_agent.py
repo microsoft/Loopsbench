@@ -1,63 +1,114 @@
-"""Codex (openai/codex) integration for LoopsBench.
+"""Run Codex against a Responses-compatible API in the task container.
 
-Wraps the prebuilt codex-rs binary from `codex/codex-rs/target/release/codex`,
-copies it into the task container, and runs it in non-interactive `exec` mode
-with goal-mode enabled. Supports the two routes used by LOOPSBENCH:
-
-- copilot/<m> -> Agent Maestro reverse proxy (OpenAI Responses API on
-  http://<host-gateway>:23335/api/openai/v1/responses).
-- azure/<m>   -> Azure CloudGPT (Responses API) using an AAD bearer token.
-
-Codex's wire protocol is now Responses-only; both proxy and Azure expose a
-Responses endpoint that codex can hit directly.
+Use OPENAI_BASE_URL / OPENAI_API_KEY or agent kwargs base_url / api_key_env.
+An explicit api_key kwarg is also supported; environment variables keep keys
+out of persisted run configuration. Bare model names use OpenAI by default;
+provider/model names use the part after the first slash as the wire model.
+The legacy copilot route retains its Agent Maestro proxy defaults.
 """
 
 from __future__ import annotations
 
+import io
+import ipaddress
+import json
 import os
+import platform
+import re
 import shlex
+import shutil
+import tarfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from loopsbench.agents.agent_name import AgentName
 from loopsbench.agents.base_agent import AgentResult, BaseAgent
+from loopsbench.terminal.network_policy import model_endpoint_hosts
 from loopsbench.terminal.tmux_session import TmuxSession
 
-_CODEX_BIN_HOST = (
-    Path(__file__).parent
-    / "codex-rs"
-    / "target"
-    / "release"
-    / "codex"
-)
+_CODEX_BIN_HOST = Path(__file__).parent / "codex-rs" / "target" / "release" / "codex"
 _CODEX_BIN_CONTAINER = "/usr/local/bin/codex"
 _CODEX_HOME_CONTAINER = "/root/.codex"
+_AUTH_DIRECTORY = "/run/loopsbench-codex"
+_AUTH_ENV = "LOOPSBENCH_CODEX_API_KEY"
 _TRAJECTORY_CONTAINER = "/tmp/codex_run.jsonl"
 _LAST_MSG_CONTAINER = "/tmp/codex_last_message.txt"
 
 
 class CodexAgent(BaseAgent):
-    """Run tasks using the openai/codex CLI in non-interactive exec mode."""
+    """Run Codex with configurable model endpoints and bearer credentials.
 
-    _MODEL_ALIASES = {
-        "azure/gpt-5.4": "azure/gpt-5.4-20260305",
-    }
+    ``base_url`` overrides OPENAI_BASE_URL / OPENAI_API_BASE. ``api_key``
+    overrides ``api_key_env`` (OPENAI_API_KEY by default). ``query_params``
+    supports provider-specific fields such as Azure's api-version.
+    ``codex_binary`` or CODEX_BIN_HOST selects a native Linux executable.
+    """
 
     def __init__(self, model_name: str, **kwargs):
         super().__init__(**kwargs)
-        self._model_name = self._MODEL_ALIASES.get(model_name, model_name)
-        self._provider, self._cli_model = self._model_name.split("/", 1)
-        if self._provider == "azure":
+        if not isinstance(model_name, str) or not model_name.strip():
+            raise ValueError("Codex requires a model name")
+        self._model_name = model_name.strip()
+        if "/" in self._model_name:
+            self._provider, self._cli_model = self._model_name.split("/", 1)
+        else:
+            self._provider, self._cli_model = "openai", self._model_name
+        if not self._provider or not self._cli_model.strip():
+            raise ValueError("Codex requires a nonempty provider and model name")
+
+        explicit_url = (
+            kwargs.get("base_url") or kwargs.get("api_base")
+            or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
+        )
+        self._legacy_proxy = self._provider == "copilot" and not explicit_url
+        if explicit_url:
+            base_url = explicit_url
+        elif self._legacy_proxy:
+            proxy = os.environ.get("PROXY_BASE", "http://localhost:23335")
+            parsed = urlsplit(proxy)
+            base_url = parsed._replace(path=parsed.path.rstrip("/") or "/api/openai/v1").geturl()
+        elif self._provider == "openai":
+            base_url = "https://api.openai.com/v1"
+        else:
             raise ValueError(
-                "codex agent cannot use the azure/* route: Azure CloudGPT only "
-                "exposes /chat/completions for these deployments, but codex's "
-                "wire protocol is Responses-only. Use copilot/<model> instead "
-                "(routes via the Agent Maestro proxy which speaks Responses)."
+                "Set base_url or OPENAI_BASE_URL to your provider's Responses API base URL"
             )
-        if self._provider != "copilot":
-            raise ValueError(
-                f"codex agent supports copilot/* models only, got "
-                f"{self._model_name!r}"
-            )
+        # This validation intentionally omits the URL from error messages.
+        if not isinstance(base_url, str) or not model_endpoint_hosts([base_url]):
+            raise ValueError("Codex requires an HTTP(S) API base URL")
+        parsed = urlsplit(base_url.strip())
+        if parsed.username is not None or parsed.password is not None or parsed.fragment:
+            raise ValueError("Use a model base URL without credentials or a fragment; configure the API key separately")
+        if parsed.path.rstrip("/").endswith(("/responses", "/chat/completions")):
+            raise ValueError("Set the API base URL (for example /v1), not a /responses or /chat/completions request URL")
+        self._base_url = parsed._replace(path=parsed.path.rstrip("/")).geturl()
+        try:
+            self._uses_host_gateway = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            self._uses_host_gateway = parsed.hostname == "localhost"
+
+        self._api_key_env = kwargs.get("api_key_env", "OPENAI_API_KEY")
+        if not isinstance(self._api_key_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self._api_key_env):
+            raise ValueError("api_key_env must be an environment variable name")
+        self._api_key = kwargs.get("api_key")
+        if self._api_key is None:
+            if self._legacy_proxy and "api_key_env" not in kwargs:
+                self._api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("PROXY_TOK")
+            else:
+                self._api_key = os.environ.get(self._api_key_env)
+        if not isinstance(self._api_key, str) or not self._api_key.strip():
+            required = "ANTHROPIC_AUTH_TOKEN or PROXY_TOK" if self._legacy_proxy and "api_key_env" not in kwargs else self._api_key_env
+            raise ValueError(f"Codex requires an API key; set {required} or provide api_key")
+        if any(char in self._api_key for char in "\r\n\0"):
+            raise ValueError("Codex API key must not contain control line separators")
+
+        self._query_params = kwargs.get("query_params", {})
+        if not isinstance(self._query_params, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in self._query_params.items()
+        ):
+            raise ValueError("query_params must map strings to strings")
+        self._codex_binary = kwargs.get("codex_binary") or os.environ.get("CODEX_BIN_HOST")
 
     @staticmethod
     def name() -> str:
@@ -66,177 +117,130 @@ class CodexAgent(BaseAgent):
     def get_trajectory_paths(self) -> list[str]:
         return [_TRAJECTORY_CONTAINER, _LAST_MSG_CONTAINER, _CODEX_HOME_CONTAINER]
 
+    def model_network_hosts(self) -> list[str]:
+        return list(dict.fromkeys([*super().model_network_hosts(), *model_endpoint_hosts([self._base_url])]))
+
     @property
     def model_uses_host_gateway(self) -> bool:
-        return self._provider == "copilot"
+        return self._uses_host_gateway
 
-    def _config_toml(self) -> str:
-        """Build the codex config.toml content for the chosen provider."""
-        if self._provider == "copilot":
-            # The provider's base_url is materialized at exec time inside the
-            # container (we substitute the gateway IP into a templated TOML).
-            # Auth is via Bearer header from PROXY_TOK env var. wire_api is
-            # responses (codex no longer supports chat).
-            return (
-                'model_provider = "loopsbench_proxy"\n'
-                f'model = "{self._cli_model}"\n'
-                'approval_policy = "never"\n'
-                'sandbox_mode = "danger-full-access"\n'
-                '\n'
-                '[model_providers.loopsbench_proxy]\n'
-                'name = "LOOPSBENCH Agent Maestro Proxy"\n'
-                'base_url = "__BASE_URL__"\n'
-                'env_key = "PROXY_TOK"\n'
-                'wire_api = "responses"\n'
-            )
-        # Azure
-        return (
-            'model_provider = "loopsbench_azure"\n'
-            f'model = "{self._cli_model}"\n'
+    def _config_toml(self, base_url: str | None = None) -> str:
+        def quote(value: str) -> str:
+            return json.dumps(value, ensure_ascii=False)
+        config = (
+            'model_provider = "loopsbench"\n'
+            f'model = {quote(self._cli_model)}\n'
             'approval_policy = "never"\n'
             'sandbox_mode = "danger-full-access"\n'
-            '\n'
-            '[model_providers.loopsbench_azure]\n'
-            'name = "LOOPSBENCH Azure CloudGPT"\n'
-            'base_url = "__BASE_URL__"\n'
-            'env_key = "AZURE_OPENAI_AD_TOKEN"\n'
+            'web_search = "disabled"\n'
+            '\n[model_providers.loopsbench]\n'
+            'name = "LoopsBench model endpoint"\n'
+            f'base_url = {quote(base_url or self._base_url)}\n'
+            f'env_key = {quote(_AUTH_ENV)}\n'
             'wire_api = "responses"\n'
-            'query_params = { "api-version" = "__API_VERSION__" }\n'
         )
+        if self._query_params:
+            config += "query_params = { " + ", ".join(
+                f"{quote(key)} = {quote(value)}" for key, value in self._query_params.items()
+            ) + " }\n"
+        return config
 
     @property
     def _env_exports(self) -> list[str]:
-        exports: list[str] = []
-        if self._provider == "copilot":
-            tok = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get(
-                "PROXY_TOK"
-            )
-            if not tok:
-                raise ValueError(
-                    "copilot provider requires ANTHROPIC_AUTH_TOKEN (or "
-                    "PROXY_TOK) in the host env. Source loopsbench-env.sh first."
-                )
-            exports.append(f"export PROXY_TOK={shlex.quote(tok)}")
-        else:
-            from loopsbench.agents.mini_swe_agent.mini_swe_agent import (
-                _get_azure_ad_token,
-            )
+        # Tmux commands and panes are logged. Transfer the secret through the
+        # Docker API instead of embedding it in a recorded export command.
+        return [f'export {_AUTH_ENV}="$(cat {_AUTH_DIRECTORY}/api-key)"']
 
-            token = _get_azure_ad_token()
-            exports.append(
-                f"export AZURE_OPENAI_AD_TOKEN={shlex.quote(token)}"
-            )
-        return exports
+    @staticmethod
+    def _gateway(session: TmuxSession) -> str:
+        container = session._container
+        manager = getattr(session, "_network_controller", None)
+        if manager is not None:
+            controller = manager._network_controllers.get("client")
+            if controller:
+                container = manager._service_container(controller)
+        elif container.attrs.get("HostConfig", {}).get("NetworkMode", "").startswith("container:"):
+            owner = container.attrs["HostConfig"]["NetworkMode"].split(":", 1)[1]
+            container = container.client.containers.get(owner)
+        networks = container.attrs.get("NetworkSettings", {}).get("Networks", {}) if container else {}
+        for network in networks.values():
+            gateway = network.get("Gateway")
+            if gateway:
+                return str(ipaddress.ip_address(gateway))
+        raise RuntimeError("Cannot resolve Docker host gateway for the local Codex endpoint")
+
+    @staticmethod
+    def _put_file(container, directory: str, name: str, contents: str) -> None:
+        payload = contents.encode("utf-8")
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            entry = tarfile.TarInfo(name)
+            entry.mode, entry.size = 0o600, len(payload)
+            archive.addfile(entry, io.BytesIO(payload))
+        if not container.put_archive(directory, stream.getvalue()):
+            raise RuntimeError("Cannot write Codex runtime configuration")
 
     def _materialize_config(self, session: TmuxSession) -> None:
-        """Write codex config.toml inside the container with the right base_url.
+        base_url = self._base_url
+        if self.model_uses_host_gateway:
+            parsed = urlsplit(base_url)
+            gateway = self._gateway(session)
+            authority = f"[{gateway}]" if ":" in gateway else gateway
+            if parsed.port is not None:
+                authority += f":{parsed.port}"
+            base_url = parsed._replace(netloc=authority).geturl()
+        container = session._container
+        result = container.exec_run(["mkdir", "-p", _CODEX_HOME_CONTAINER, _AUTH_DIRECTORY])
+        if result.exit_code:
+            raise RuntimeError("Cannot create Codex runtime directories")
+        self._put_file(container, _CODEX_HOME_CONTAINER, "config.toml", self._config_toml(base_url))
+        # Keep the key outside CODEX_HOME, which is collected with trajectories.
+        self._put_file(container, _AUTH_DIRECTORY, "api-key", self._api_key)
 
-        For copilot we resolve <gateway-ip>:23335 from /proc/net/route at
-        container exec time. For azure we use AZURE_API_BASE/AZURE_API_VERSION
-        from the host env.
-        """
-        from urllib.parse import urlparse
-
-        if self._provider == "copilot":
-            host_proxy = os.environ.get("PROXY_BASE", "http://localhost:23335")
-            parsed = urlparse(host_proxy)
-            port = parsed.port or 23335
-            scheme = parsed.scheme or "http"
-            cfg = self._config_toml()
-            # Compose the final config inside the container so the gateway IP
-            # is the container's own gateway, not the host's.
-            session.send_keys(
-                f'mkdir -p {_CODEX_HOME_CONTAINER} Enter',
-                block=True,
-                max_timeout_sec=5.0,
-            )
-            template = cfg.replace(
-                "__BASE_URL__", f"{scheme}://__GW__:{port}/api/openai/v1"
-            )
-            import base64
-
-            cfg_b64 = base64.b64encode(template.encode()).decode()
-            session.send_keys(
-                f"echo {shlex.quote(cfg_b64)} | base64 -d > /tmp/codex.toml.tpl Enter",
-                block=True,
-                max_timeout_sec=5.0,
-            )
-            # Substitute __GW__ with the container's default-gateway IP.
-            session.send_keys(
-                "GW=$(h=$(awk '$2 == \"00000000\" {print $3; exit}' /proc/net/route); "
-                'printf "%d.%d.%d.%d" '
-                '"0x${h:6:2}" "0x${h:4:2}" "0x${h:2:2}" "0x${h:0:2}"); '
-                f'sed "s/__GW__/$GW/" /tmp/codex.toml.tpl > {_CODEX_HOME_CONTAINER}/config.toml Enter',
-                block=True,
-                max_timeout_sec=10.0,
-            )
-        else:
-            azure_api_base = os.environ.get(
-                "AZURE_API_BASE", "https://cloudgpt-openai.azure-api.net"
-            )
-            azure_api_version = os.environ.get(
-                "AZURE_API_VERSION", "2025-04-01-preview"
-            )
-            base_url = (
-                f"{azure_api_base}/openai/deployments/{self._cli_model}"
-            )
-            cfg = self._config_toml().replace("__BASE_URL__", base_url).replace(
-                "__API_VERSION__", azure_api_version
-            )
-            import base64
-
-            cfg_b64 = base64.b64encode(cfg.encode()).decode()
-            session.send_keys(
-                f'mkdir -p {_CODEX_HOME_CONTAINER} Enter',
-                block=True,
-                max_timeout_sec=5.0,
-            )
-            session.send_keys(
-                f"echo {shlex.quote(cfg_b64)} | base64 -d > "
-                f"{_CODEX_HOME_CONTAINER}/config.toml Enter",
-                block=True,
-                max_timeout_sec=5.0,
-            )
+    def _resolve_binary(self) -> Path:
+        explicit = getattr(self, "_codex_binary", None)
+        if explicit:
+            path = Path(explicit).expanduser().resolve()
+            if not path.is_file():
+                raise RuntimeError("Configured Codex binary does not exist; check codex_binary or CODEX_BIN_HOST")
+            return path
+        if _CODEX_BIN_HOST.is_file():
+            return _CODEX_BIN_HOST
+        executable = shutil.which("codex")
+        if executable:
+            path = Path(executable).resolve()
+            with path.open("rb") as source:
+                if source.read(4) == b"\x7fELF":
+                    return path
+            # The npm command is a JS launcher. Copy its Linux native payload,
+            # not a launcher whose node_modules would be absent in the image.
+            machine = platform.machine()
+            arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
+            if arch:
+                triple = ("x86_64" if arch == "x64" else "aarch64") + "-unknown-linux-musl"
+                package = path.parent.parent
+                roots = [package / "vendor", package / "node_modules" / "@openai" / f"codex-linux-{arch}" / "vendor",
+                         package.parent / f"codex-linux-{arch}" / "vendor"]
+                for root in roots:
+                    for suffix in ("bin/codex", "codex/codex"):
+                        binary = root / triple / suffix
+                        if binary.is_file():
+                            return binary
+        raise RuntimeError("No native Linux Codex binary found; install Codex on the host or set CODEX_BIN_HOST / codex_binary")
 
     def install(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
-        if not _CODEX_BIN_HOST.is_file():
-            raise RuntimeError(
-                f"codex binary not found at {_CODEX_BIN_HOST}. "
-                "Build it with: "
-                "cd loopsbench/agents/codex/codex-rs && "
-                "cargo build --release --bin codex"
-            )
+        from loopsbench.terminal.docker_compose_manager import DockerComposeManager
 
-        from loopsbench.terminal.docker_compose_manager import (
-            DockerComposeManager,
-        )
-
-        container = session._container  # type: ignore[attr-defined]
-        # Copy the prebuilt codex binary into the container.
         DockerComposeManager.copy_to_container(
-            container=container,
-            paths=_CODEX_BIN_HOST,
-            container_dir="/usr/local/bin",
-            container_filename="codex",
+            container=session._container, paths=self._resolve_binary(),
+            container_dir="/usr/local/bin", container_filename="codex",
         )
-        session.send_keys(
-            f"chmod +x {_CODEX_BIN_CONTAINER} Enter",
-            block=True,
-            max_timeout_sec=10.0,
-        )
+        session.send_keys(f"chmod +x {_CODEX_BIN_CONTAINER} Enter", block=True, max_timeout_sec=10.0)
 
     def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
-        # Each new tmux session needs provider configuration and auth exports.
         self._materialize_config(session)
-
-        # Export auth env vars.
         for export_cmd in self._env_exports:
-            session.send_keys(
-                f"{export_cmd} Enter",
-                block=True,
-                max_timeout_sec=10.0,
-            )
-
+            session.send_keys(f"{export_cmd} Enter", block=True, max_timeout_sec=10.0)
 
     def perform_task(
         self,
@@ -245,11 +249,6 @@ class CodexAgent(BaseAgent):
         logging_dir: Path | None = None,
         timeout_sec: float | None = None,
     ) -> AgentResult:
-        # Run codex in non-interactive exec mode with goal-mode enabled.
-        # --skip-git-repo-check because /workspace may not be a git repo at
-        # task start. --json streams events to stdout (also captured to file).
-        # --output-last-message captures the final assistant message.
-        # CODEX_HOME -> /root/.codex so config.toml is read.
         cmd = (
             f"CODEX_HOME={_CODEX_HOME_CONTAINER} "
             f"{_CODEX_BIN_CONTAINER} exec "
@@ -262,10 +261,5 @@ class CodexAgent(BaseAgent):
             f"-o {_LAST_MSG_CONTAINER} "
             f"{shlex.quote(instruction)} > {_TRAJECTORY_CONTAINER} 2>&1"
         )
-        session.send_keys(
-            f"{cmd} Enter",
-            block=True,
-            max_timeout_sec=86400.0,
-        )
-
+        session.send_keys(f"{cmd} Enter", block=True, max_timeout_sec=timeout_sec if timeout_sec is not None else 86400.0)
         return AgentResult()
