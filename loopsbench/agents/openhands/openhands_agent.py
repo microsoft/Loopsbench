@@ -218,14 +218,7 @@ class OpenHandsAgent(BaseAgent):
         container.exec_run("mkdir -p /opt/oh-src")
         container.put_archive("/opt/oh-src", buf.read())
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
-        # Capture working directory set by the task Dockerfile's WORKDIR.
-        session.send_keys(
-            "export LOOPSBENCH_WORKSPACE=$(pwd) Enter",
-            block=True,
-            max_timeout_sec=10.0,
-        )
-
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         # Ensure curl is available, then install uv.
         session.send_keys(
             "apt-get update -qq && apt-get install -y curl -q Enter",
@@ -308,6 +301,19 @@ class OpenHandsAgent(BaseAgent):
             max_timeout_sec=600.0,
         )
 
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        # Installation persists, but each round starts a fresh tmux shell.
+        session.send_keys(
+            "export LOOPSBENCH_WORKSPACE=$(pwd); "
+            "source /opt/oh-env/bin/activate Enter",
+            block=True,
+            max_timeout_sec=10.0,
+        )
+        session.send_keys(
+            "source $HOME/.cargo/env 2>/dev/null || true Enter",
+            block=True,
+            max_timeout_sec=10.0,
+        )
         # Export LLM credentials into the container environment.
         for export_cmd in self._env_exports:
             session.send_keys(

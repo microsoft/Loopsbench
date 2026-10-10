@@ -133,7 +133,7 @@ def test_incompatible_network_never_silently_runs_unrestricted(setting):
         controlled_compose({"services": {"client": setting}}, NetworkPlan(), "egress:test")
 
 
-def test_custom_agent_uses_prepare_then_scoped_solve_even_on_failure(tmp_path):
+def test_custom_agent_uses_prepare_then_solve_even_on_failure(tmp_path):
     events = []
 
     class CustomAgent(BaseAgent):
@@ -156,15 +156,16 @@ def test_custom_agent_uses_prepare_then_scoped_solve_even_on_failure(tmp_path):
         try:
             yield
         finally:
-            events.append("restore")
+            events.append("leave")
 
     harness = Harness.__new__(Harness)
     harness._logger = logging.getLogger(__name__)
     result, failure = harness._run_agent(
-        SimpleNamespace(agent_network_phase=phase), SimpleNamespace(task_id="test"), CustomAgent(base_url="https://custom.example.org/v1"), "fix",
+        SimpleNamespace(agent_network_phase=phase, prepare_agent=lambda agent, logging_dir: agent.prepare(None, logging_dir)),
+        SimpleNamespace(task_id="test"), CustomAgent(base_url="https://custom.example.org/v1"), "fix",
         timeout_sec=10, logging_dir=tmp_path,
     )
-    assert events == ["prepare", "allowlist", "solve", "restore"]
+    assert events == ["prepare", "allowlist", "solve", "leave"]
     assert result is None and failure == FailureMode.UNKNOWN_AGENT_ERROR
 
     class LegacyAgent(BaseAgent):
@@ -241,7 +242,7 @@ def test_real_legacy_task_phase_switch_and_separate_verifier(tmp_path):
             # Local services remain available under the restricted policy.
             check = "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(); socket.create_connection(s.getsockname(),2)"
             assert client.exec_run(["python3", "-c", check]).exit_code == 0
-        assert fetch(client, "blocked.test").exit_code == 0
+        assert fetch(client, "blocked.test").exit_code != 0
         with manager.agent_network_phase(uses_host_gateway=True):
             effective = json.loads((tmp_path / "logs/network-policy.json").read_text())
             controller = manager._service_container(manager._network_controllers["client"])

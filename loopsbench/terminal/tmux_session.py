@@ -63,6 +63,19 @@ class TmuxSession:
 
     # -- public API --
 
+    def prepare_agent(self, agent, logging_dir: Path | None = None) -> None:
+        if self._network_controller is not None:
+            self._network_controller.prepare_agent(agent, self, logging_dir)
+            return
+        # Standalone sessions without a Compose manager retain hook support.
+        installations = getattr(self, "_agent_installations", {})
+        key = (type(agent), agent.version)
+        if key not in installations:
+            installations[key] = agent.install(session=self, logging_dir=logging_dir)
+        self._agent_installations = installations
+        agent._installation = installations[key]
+        agent.prepare(session=self, logging_dir=logging_dir)
+
     def agent_network_phase(self, *, model_hosts=None, uses_host_gateway=False):
         if self._network_controller is None:
             return nullcontext()

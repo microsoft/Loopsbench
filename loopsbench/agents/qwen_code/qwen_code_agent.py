@@ -671,13 +671,13 @@ class QwenCodeAgent(BaseAgent):
     def model_network_hosts(self) -> list[str]:
         return [*super().model_network_hosts(), *model_endpoint_hosts([_dashscope_base_url_from_env(os.environ)])]
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> tuple[str, str | None] | None:
         if _workspace_mode() != "container":
             return
         destination = logging_dir / "qwen-setup.log" if logging_dir else Path("qwen-setup.log")
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("w", encoding="utf-8") as log_f:
-            self._prepared_cli = _ensure_container_qwen_cli(session._container, os.environ.copy(), log_f)
+            return _ensure_container_qwen_cli(session._container, os.environ.copy(), log_f)
 
     def perform_task(
         self,
@@ -713,7 +713,7 @@ class QwenCodeAgent(BaseAgent):
             with open(traj_path, "w", encoding="utf-8") as traj_f, open(
                 log_path, "w", encoding="utf-8"
             ) as log_f:
-                qwen_exe, path_env = self._prepared_cli
+                qwen_exe, path_env = self.installation
                 qwen_argv: list[str] = [
                     qwen_exe,
                     *auth_flags,

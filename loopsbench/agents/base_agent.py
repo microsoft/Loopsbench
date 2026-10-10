@@ -46,7 +46,7 @@ class BaseAgent(ABC):
 
     @property
     def version(self) -> str | None:
-        return self._version
+        return getattr(self, "_version", None)
 
     @abstractmethod
     def perform_task(
@@ -69,11 +69,26 @@ class BaseAgent(ABC):
         """
         raise NotImplementedError
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
-        """Optional installation hook, run under the environment network policy.
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> object:
+        """Install tools once per client container and agent class/version.
 
-        Existing custom agents need no new method. Agents that download tools
-        should move those operations here; perform_task runs under agent policy.
+        The first installation runs before solving under the environment policy.
+        Return optional host-side setup data, available as ``installation`` on
+        subsequent agent instances in this trial. Failed installs are not cached.
+        """
+
+    @property
+    def installation(self) -> object:
+        """Setup data bound by the harness before each preparation/invocation."""
+        return getattr(self, "_installation", None)
+
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        """Initialize each session/attempt, including environment and config.
+
+        Existing custom hooks are still called on every attempt. Only the first
+        preparation can use the environment policy; after solving starts, all
+        subsequent preparation stays restricted. Move downloads into ``install``
+        when they must run only once. No new abstract methods are required.
         """
 
     def model_network_hosts(self) -> list[str]:

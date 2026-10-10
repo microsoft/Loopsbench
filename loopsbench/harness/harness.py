@@ -1036,7 +1036,7 @@ PY
         agent: BaseAgent,
         instruction: str,
     ) -> AgentResult | None:
-        agent.prepare(session=session, logging_dir=logging_dir)
+        session.prepare_agent(agent, logging_dir=logging_dir)
         with session.agent_network_phase(
             model_hosts=agent.model_network_hosts(),
             uses_host_gateway=agent.model_uses_host_gateway,
@@ -1065,7 +1065,7 @@ PY
         logging_dir = logging_dir or handler.trial_paths.agent_logging_dir
 
         try:
-            agent.prepare(session=session, logging_dir=logging_dir)
+            session.prepare_agent(agent, logging_dir=logging_dir)
             with session.agent_network_phase(
                 model_hosts=agent.model_network_hosts(),
                 uses_host_gateway=agent.model_uses_host_gateway,

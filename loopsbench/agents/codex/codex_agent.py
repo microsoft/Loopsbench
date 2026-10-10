@@ -198,7 +198,7 @@ class CodexAgent(BaseAgent):
                 max_timeout_sec=5.0,
             )
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         if not _CODEX_BIN_HOST.is_file():
             raise RuntimeError(
                 f"codex binary not found at {_CODEX_BIN_HOST}. "
@@ -225,7 +225,8 @@ class CodexAgent(BaseAgent):
             max_timeout_sec=10.0,
         )
 
-        # Write the provider-specific config inside the container.
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        # Each new tmux session needs provider configuration and auth exports.
         self._materialize_config(session)
 
         # Export auth env vars.

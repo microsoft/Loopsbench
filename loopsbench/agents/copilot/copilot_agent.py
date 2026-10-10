@@ -166,7 +166,7 @@ class CopilotAgent(BaseAgent):
             max_timeout_sec=10.0,
         )
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         self._ensure_copilot_cli(session)
 
     def perform_task(

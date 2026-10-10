@@ -129,7 +129,7 @@ class MiniSweAgent(BaseAgent):
 
         return exports
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         # Provision mini-swe-agent inside the container. Two paths:
         #  1) If LOOPSBENCH_MINI_BUNDLE points at a tarball, copy + extract it
         #     (self-contained Python 3.11 + mini at /opt/python/bin/mini).
@@ -174,7 +174,8 @@ class MiniSweAgent(BaseAgent):
                 max_timeout_sec=300.0,
             )
 
-        # Export API keys
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        # Export API keys into every new shell, without reinstalling the agent.
         for export_cmd in self._env_exports:
             session.send_keys(
                 f"{export_cmd} Enter",

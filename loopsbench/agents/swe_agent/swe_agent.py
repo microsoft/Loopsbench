@@ -116,34 +116,12 @@ class SweAgent(BaseAgent):
         # Create the directory so the assertion passes.
         container.exec_run("mkdir -p /opt/swe-agent-src/trajectories")
 
-    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
-        # Capture working directory set by the task Dockerfile's WORKDIR.
-        session.send_keys(
-            "export LOOPSBENCH_WORKSPACE=$(pwd) Enter",
-            block=True,
-            max_timeout_sec=10.0,
-        )
-
+    def install(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
         # Install git (required for git init) and curl (for uv installer).
         session.send_keys(
             "apt-get update -qq && apt-get install -y git curl -q Enter",
             block=True,
             max_timeout_sec=120.0,
-        )
-
-        # SWE-agent needs a clean git repository at the workspace path.
-        # Remove any nested .git dirs first so the top-level repo covers all
-        # files uniformly, then commit everything so the repo is not dirty.
-        session.send_keys(
-            "find $LOOPSBENCH_WORKSPACE -mindepth 2 -maxdepth 3 -name .git -type d "
-            r"-exec rm -rf {} + 2>/dev/null; "
-            "git config --global user.email loopsbench@loopsbench.io && "
-            "git config --global user.name LOOPSBENCH && "
-            "git -C $LOOPSBENCH_WORKSPACE init -q && "
-            "git -C $LOOPSBENCH_WORKSPACE add -A && "
-            "git -C $LOOPSBENCH_WORKSPACE commit -q -m initial Enter",
-            block=True,
-            max_timeout_sec=60.0,
         )
 
         # Copy bundled SWE-agent source into the container via Docker API.
@@ -205,6 +183,30 @@ class SweAgent(BaseAgent):
             max_timeout_sec=10.0,
         )
 
+    def prepare(self, session: TmuxSession, logging_dir: Path | None = None) -> None:
+        session.send_keys(
+            "export LOOPSBENCH_WORKSPACE=$(pwd); "
+            "source /opt/sweagent-env/bin/activate Enter",
+            block=True,
+            max_timeout_sec=10.0,
+        )
+        session.send_keys(
+            "source $HOME/.cargo/env 2>/dev/null || true Enter",
+            block=True,
+            max_timeout_sec=10.0,
+        )
+        # Keep per-round workspace preparation local under the solving policy.
+        session.send_keys(
+            "find $LOOPSBENCH_WORKSPACE -mindepth 2 -maxdepth 3 -name .git -type d "
+            r"-exec rm -rf {} + 2>/dev/null; "
+            "git config --global user.email loopsbench@loopsbench.io && "
+            "git config --global user.name LOOPSBENCH && "
+            "git -C $LOOPSBENCH_WORKSPACE init -q && "
+            "git -C $LOOPSBENCH_WORKSPACE add -A && "
+            "git -C $LOOPSBENCH_WORKSPACE commit -q -m initial Enter",
+            block=True,
+            max_timeout_sec=60.0,
+        )
         # Export API keys into the container environment.
         for export_cmd in self._env_exports:
             session.send_keys(

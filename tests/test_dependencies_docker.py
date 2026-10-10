@@ -93,9 +93,12 @@ def test_install_new_version_test_snapshot_rollback_and_network_boundary(tmp_pat
                 assert result.exit_code == 0, result.raw_stdout + result.raw_stderr
                 assert result.passed == ['tests/test_dependency.py::version']
         if language == 'python':
-            assert client.exec_run(['python3', '-m', 'pip', 'index', 'versions', 'packaging']).exit_code == 0
+            assert client.exec_run(['python3', '-m', 'pip', 'index', 'versions', 'packaging']).exit_code != 0
+            result = client.exec_run(['python3', '-m', 'pip', 'install', 'click==' + versions[0]])
+            assert result.exit_code == 0, result.output.decode()
         else:
-            assert b'loopsbench-dependencies' not in client.exec_run(['go', 'env', 'GOPROXY']).output
+            assert b'loopsbench-dependencies' in client.exec_run(['go', 'env', 'GOPROXY']).output
+        assert manager.dependencies.phase_path.read_text() == 'solving'
         resolution = json.loads((manager.dependencies.directory / 'data/resolution.json').read_text())
         assert any('sha256' in record for record in resolution.values())
         assert len(list(manager.dependencies.directory.glob('prepare-*.log'))) == 3

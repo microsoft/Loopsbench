@@ -170,6 +170,8 @@ class DockerComposeManager:
         self.dependencies: DependencyRuntime | None = None
         self._network_temp = None
         self._network_controllers: dict[str, str] = {}
+        self._agent_network_started = False
+        self._agent_installations: dict[tuple[str, type, str | None], object] = {}
         self._image_resolution = DockerImageResolution(
             requested_client_image_ref=self._client_image_name
         )
@@ -521,13 +523,28 @@ class DockerComposeManager:
             (self._logs_path / "network-policy.json").write_text(json.dumps(record, indent=2))
 
     def set_network_policy(self, service: str, policy: NetworkPolicy) -> None:
+        if (service == "client" and self._agent_network_started
+                and policy.network_mode == "public" and self._network is not None
+                and self._network.agent.network_mode != "public"):
+            raise ValueError("Cannot restore public client networking after solving has started")
         controller = self._network_controllers.get(service)
         if controller is None:
             return
         self._run_compose(["exec", "-T", controller, *policy.command()])
 
+    def prepare_agent(self, agent, session, logging_dir: Path | None = None) -> None:
+        # This receipt lives in the host controller, never in a candidate file.
+        # New outer-loop agent objects reuse the installation in this container
+        # while retaining their own per-round state and session initialization.
+        key = (session._container.id, type(agent), agent.version)
+        if key not in self._agent_installations:
+            self._agent_installations[key] = agent.install(session=session, logging_dir=logging_dir)
+        agent._installation = self._agent_installations[key]
+        agent.prepare(session=session, logging_dir=logging_dir)
+
     @contextmanager
     def agent_network_phase(self, *, model_hosts: list[str] | None = None, uses_host_gateway: bool = False):
+        """Enter solving policy, which remains active until container teardown."""
         if self._network is None:
             yield
             return
@@ -544,16 +561,14 @@ class DockerComposeManager:
                 raise RuntimeError("Cannot resolve Docker gateway for the configured model proxy")
             hosts.extend(gateways)
         policy = self._network.agent_policy(hosts)
+        self._agent_network_started = True
         self.set_network_policy("client", policy)
-        try:
-            if self.dependencies is not None:
-                self.dependencies.client_phase(True)
-            self._record_network_policy(policy)
-            yield
-        finally:
-            if self.dependencies is not None:
-                self.dependencies.client_phase(False)
-            self.set_network_policy("client", self._network.environment)
+        if self.dependencies is not None:
+            self.dependencies.client_phase(True)
+        self._record_network_policy(policy)
+        # Returning, timing out, or raising must not reopen the network or
+        # switch package managers back to their public installation settings.
+        yield
 
     def build(self) -> None:
         self._run_compose(["build"])
