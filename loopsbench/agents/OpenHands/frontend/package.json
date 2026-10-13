@@ -25,7 +25,7 @@
     "framer-motion": "^12.28.1",
     "i18next": "^25.8.0",
     "i18next-browser-languagedetector": "^8.2.0",
-    "i18next-http-backend": "^3.0.2",
+    "i18next-http-backend": "^4.0.2",
     "isbot": "^5.1.33",
     "lucide-react": "^0.562.0",
     "monaco-editor": "^0.55.1",
