@@ -1,0 +1,13 @@
+project: "Template Task"
+description: >
+  Replace this placeholder module DAG with the real implementation-order graph.
+nodes:
+  - id: example_unit
+    label: "Example Unit"
+    path: "src/example.py"
+    description: >
+      Replace this placeholder node with the real module description.
+    files_count: 1
+    loc: 1
+    impl_order: 1
+edges: []

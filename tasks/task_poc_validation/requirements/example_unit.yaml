@@ -1,0 +1,12 @@
+id: "example_unit"
+title: "Example Unit"
+category: general
+requirement: |-
+  Replace this placeholder requirement with the actual unit definition.
+
+  Include:
+
+  - context
+  - files or symbols in scope
+  - prerequisites
+  - acceptance signals

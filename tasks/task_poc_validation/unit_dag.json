@@ -1,0 +1,13 @@
+{
+  "repo_id": "template",
+  "total_units": 1,
+  "num_layers": 1,
+  "nodes": [
+    {
+      "id": "example_unit",
+      "layer": 0,
+      "has_tests": true
+    }
+  ],
+  "edges": []
+}
