@@ -1,0 +1,4 @@
+{
+  "packet_layer.yaml": "gold_patches/packet_layer.diff",
+  "tcp_engine.yaml": "gold_patches/tcp_engine.diff"
+}
